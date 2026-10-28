@@ -18,3 +18,6 @@
 ## [2026-10-28] milestone | v0.0.1 发布：单会话 Matrix-Core（WS/stdio + 协议 v1.1 + 48 tests + verify ALL GREEN），commit 2e7257e / tag v0.0.1
 ## [2026-10-28] deliverable | simplify（reuse/quality/efficiency 三路 reviewer）修复 M1–M5 与 minors；PathPolicy/WS 背压/Hub 等列 v0.0.2
 ## [2026-10-28] wiki | 新建 [[发布-v0.0.1]]，INDEX/计划页同步发布状态
+## [2026-10-28] milestone | v0.0.2 发布：PathPolicy/统一/WS 合批+transcript.fetch/Hub+worker/图片附件；92 pass/0 fail/ALL GREEN；commit 0eca093 / tag v0.0.2
+## [2026-10-28] deliverable | simplify 三 reviewer（reuse/quality/efficiency），HIGH 全修（悬空 symlink/overflow owner/并发 attach/batcher 记账/too_large id 等）；剩余列 v0.0.3
+## [2026-10-28] wiki | 新建 [[发布-v0.0.2]]，INDEX/计划同步；GUI 联调指南 docs/gui-integration-v0.0.2.md
