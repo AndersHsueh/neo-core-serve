@@ -4,7 +4,7 @@
 
 ## 摘要
 
-v0 分五段：C0 协议冻结 + 骨架（3d）→ C0b 纯核心移植（4d，只搬无 ui 依赖模块）→ C1 端口/事件化（15d）→ C2 协议与服务（16d，含 session shims、持久化/锁/恢复、e2e、GUI conformance）→ C3 硬化（9d，混沌/打包/安全/v0.1.0）。v0 合计 **47 人日（≈9–10 周）**；v0.5 Hub 15d；CLI 切换（C5，10d+）另立。基线：neo 1052 pass/0 fail/67 + PTY 21/21（2026-10-28 实跑/evidence）。详见 `docs/work-plan.md`。
+v0 分五段：C0 协议冻结 + 骨架（3d）→ C0b 纯核心移植（4d，只搬无 ui 依赖模块；system-prompt 因间接依赖 tools/ui 放到 C1）→ C1 端口/事件化（15d）→ C2 协议与服务（16d，含 session shims、持久化/锁/恢复、e2e、in-repo conformance harness）→ C3 硬化（9d，混沌/打包/安全/v0.1.0）。v0 合计 **47 人日（≈9–10 周）**；v0.5 Hub 15d；CLI 切换（C5，10d+）另立。基线：neo 1052 pass/0 fail/67 + PTY 21/21（2026-10-28 实跑/evidence）。详见 `docs/work-plan.md`。
 
 ## 里程碑
 

@@ -10,10 +10,10 @@ Matrix-Core 是「独立进程、无终端依赖、可被多客户端驱动」�
 
 - **分层**：protocol 零依赖；core 独立；serve 做 CoreEvent→SessionEvent 映射与 reducer 快照；main 只做入口。
 - **事件**：durable（turn.start/aborted、assistant.end、tool.*、approval/question、stats、banner、context、session.*、error、compact.*、command.result、session.cleared）+ ephemeral（delta、activity、notice）。
-- **seq/epoch**：core 分配 seq，随 durable 事件落盘；崩溃后从最后 durable 继续；epoch 不匹配/`lastSeq>server.seq` → 强制快照。
-- **恢复**：`turn.start{msgCount}` + 轮末先落 messages 再落终态；恢复对账 `meta.lastTurnId` vs transcript 尾部；半轮丢弃并补 `turn.aborted{crash}`；abort 先修 messages 尾部。
-- **审批/提问**：线格式 id=blockId；deadline 是安全网（owner 在线滑动、断线宽限、无客户端立即收敛）；`allow-session` 仅 write/edit，shell 不放行。
-- **安全**：PathPolicy 包裹所有文件操作；EventSink/persist/logger 边界脱敏；outputRef 不透明 id；本地 token/Origin。
+- **seq/epoch**：core 分配 seq，**只有 durable 事件推进并落盘**；ephemeral 携带当前 durable seq（不推进）；崩溃后从最后 durable 继续；epoch 不匹配/`lastSeq>最高 durable seq` → 强制快照。
+- **恢复**：轮中只落非终态事件；轮末先原子写 messages+meta，再落终态 `stats`/`turn.aborted`；恢复对账 `meta.lastTurnId` vs transcript 尾部，终态唯一；abort 先修 messages 尾部。
+- **审批/提问**：线格式 id=blockId；deadline 是安全网（owner 任意帧/`ping`/attach 续期、pending 时客户端 ≤60s ping、断线宽限、无客户端立即收敛）；`allow-session` 仅 write/edit，shell 不放行。
+- **安全**：PathPolicy 包裹所有文件操作；EventSink/persist/logger 边界脱敏；outputRef 不透明 id；本地 token/Origin；锁与 mailbox `.alive` 互认。
 - **命令**：Command 注册表 + CommandOutcome(ViewBlock)；`commands.json` 单源；交互走 question/approval。
 - **进程**：v0 单会话（`~/.neo/run` 发现 + 单实例锁）；v0.5 Hub + worker 池。
 

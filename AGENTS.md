@@ -34,7 +34,7 @@ tests/ scripts/       单元/契约/集成/混沌/守卫；fake-llm/probe/verify
 - **依赖单向**：`protocol` 零依赖；`core` 不 import `serve/protocol`；`serve` 同时 import 两者；`main → serve`。
 - **core 无终端**：禁 import `ui/tui/input`；禁 `process.stdout.isTTY`；禁 `process.exit`（`main.ts` 白名单）；日志走注入 Logger。
 - **seq/epoch**：core 分配 seq 并随 durable 事件持久化；epoch 标识 transcript 世代；attach 不匹配强制快照。
-- **单写者**：`run/locks/<id>` + mailbox `.alive` 互认；Hub 不写会话文件；路径从 id 重算，不信 `meta.path`。
+- **单写者**：`run/locks/<id>/` + mailbox `.alive` 互认；Hub 不写会话文件；路径从 id 重算，不信 `meta.path`。
 - **安全默认**：`PathPolicy`（realpath+symlink+cwd）包裹所有文件操作；脱敏在 EventSink/persist/logger 边界；目录 0700/文件 0600；`outputRef` 不透明。
 - **stdout 纪律**：stdio 模式 stdout 只出帧；WS 模式 stdout 不写日志；日志 stderr/文件。
 - **协议先行**：改行为先改 `docs/protocol-v1.md` + fixtures，再改代码；客户端按 `protocol.lock.json` 同步。

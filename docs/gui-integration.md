@@ -18,6 +18,7 @@
 | ready | `{kind:"ready",user}` | 保持；core 返回 `{user:{id,email,displayName,role}}` + `coreVersion/protocolVersion/capabilities/epoch` |
 | 失败 | — | 4401 直接关闭；客户端走登录/重连；`auth.expired` 本轮不实现 |
 | 重连 | 指数退避 + attach | 不变；attach 带 `lastSeq`+`epoch`（见 §3） |
+| 心跳 | — | pending 审批/提问时每 ≤60s 发 `ping`（liveness，续期 deadline） |
 
 ---
 
@@ -54,6 +55,8 @@ GUI 启动链：`session.list` → `settings.get` → `session.attach` → `usag
 
 可选：`features/transcript` 渲染 `notice`（toast）与 `activity`（spinner 文案）；不实现也能跑。
 
+另外：`guards` 的 `ERROR_KEYS` 需补 `question_expired` / `slow_consumer`；`types` 保留 `auth.expired` 与 `auth.*` 命令名（WS 返回 unsupported）。
+
 ---
 
 ## 4. 协议 vendoring（GUI 仓）
@@ -74,7 +77,7 @@ GUI 启动链：`session.list` → `settings.get` → `session.attach` → `usag
 | `question` 多选/自定义 | v0 先支持单选；多选 UI 后续（core 仍能收发） |
 | `notice/activity` 未知 | 忽略或 toast；不报协议错 |
 | `assistant.end.text` 权威 | 用它覆盖 delta 累积（避免缺字） |
-| `snapshot.live` | `hydrate` 恢复 partial 文本/工具相位 |
+| `snapshot.live` | server 的 `blocks` 已含 partial 块；`hydrate` 直接用，不要合成；未知 blockId 的 delta 要 upsert |
 | `usage.costMicros=0` | 显示「未计价」 |
 | 事件 seq 可能跳号 | 只用 `lastSeq` 续传，不做连续性断言 |
 | `session.close/settings.patch` unsupported | toast 容错 |

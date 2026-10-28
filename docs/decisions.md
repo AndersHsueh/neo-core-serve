@@ -81,7 +81,7 @@
   - `turn.start` 记录 `msgCount`；轮末**先落 messages，再落终态事件**；恢复时按 `meta.lastTurnId` 与 transcript 尾部对账：一致→补 stats，不一致→丢弃半轮视图、messages 截断到 msgCount、补 `turn.aborted{crash}`。
   - abort：先修 messages 尾部（去掉悬空 `assistant(tool_calls)`/不完整 tool 结果），再落盘，最后发 `turn.aborted`；mailbox 轮同样适用。
   - 单写者 = core 进程；Hub 不写会话文件（v0.5）；session 文件路径从 id 重算，不信任 `meta.path`。
-  - 锁：`~/.neo/run/locks/<id>` 与 mailbox `.alive` 互认；pid + 心跳 + 过期回收。
+  - 锁：`~/.neo/run/locks/<id>/` 与 mailbox `.alive` 互认；pid + 心跳 + 过期回收。
 - **后果**：
   - 快照/恢复保真；半轮不会污染下一轮 LLM 请求。
   - transcript 需要滚动/保留策略（30 天，可配）；torn last line 需容错。
@@ -96,7 +96,7 @@
 - **背景**：现有 `confirm()` 是 `Promise<boolean>`，无 request id、无 deadline、无断线兜底；`ask_user` 只在 TTY 注册；固定 120s 会误杀正在看 diff 的用户。
 - **决策**：
   - 线格式请求 id = `blockId`（ULID）；core 内部 requestId 与之 1:1，不引入第二套 id。
-  - deadline 语义：**owner 在线即滑动延长**（默认 30min，attach/heartbeat 续期）；owner 断开后 60s 宽限；无客户端立即收敛（审批 deny、提问 cancel）。
+  - deadline 语义：**owner 在线即滑动延长**（默认 30min；owner 任意帧/`ping`/attach 都续期；`ping` 定义为 liveness，pending 时客户端 ≤60s 一次）；owner 断开后 60s 宽限；无客户端立即收敛（审批 deny、提问 cancel）。
   - `by`：`user | timeout | no_client | crash | shutdown | abort`；所有 pending 在 abort/崩溃/关闭时统一 resolve。
   - `allow-session` 仅对 write/edit（cwd 内）生效；**shell 永不内存放行**；不落盘。
   - 无人值守（mailbox 轮）：写操作默认拒绝一次并 banner 提示，不反复弹审批。
@@ -191,7 +191,7 @@
 - **状态**：已定
 - **背景**：过渡期 neo CLI 与 core 共享 `~/.neo`（sessions/mailbox/logs/tmp），但两套锁不互认；`saveSession` 使用 JSON 里的 `meta.path`；日志/清理可能互相删除。
 - **决策**：
-  - **锁契约**：core 的 `run/locks` 与 mailbox `.alive` 互认；任一存在即拒绝双开；启动时校验 pid 存活与心跳。
+  - **锁契约**：core 的 `run/locks/<id>/` 与 mailbox `.alive` 互认；任一存在即拒绝双开；启动时校验 pid 存活与心跳。`.alive` 缺失（如 `-p` 非交互 CLI）时，core 仍持自己的锁并在打开/落盘前校验会话文件未被外部改动（mtime/hash）。
   - 路径从 id 重算（`~/.neo/sessions/<id>.json`），不信任 `meta.path`。
   - 日志分区：core 写 `logs/core/`，turn 诊断沿用 `logs/turns/`；清理只碰自己命名空间；与 CLI 的 maintenance 互斥（锁内执行）。
   - **导入/迁移**：提供 `matrix-core import <id>`（只读打开旧会话、不写 transcript）；切换前可 `backup`；旧 CLI 写过的会话由 core 打开时按 D6 对账重建。

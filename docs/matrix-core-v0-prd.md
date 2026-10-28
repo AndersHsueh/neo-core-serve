@@ -73,7 +73,7 @@
 - 单会话：`--cwd`、`--mode`、`--tier`、`--resume <id>`；启动参数覆盖 config。
 - 落盘：messages（LLM 真源）+ transcript（durable 事件 + epoch/seq）+ 单写者锁。
 - 崩溃恢复：对账 messages/transcript、半轮 aborted、torn line 容错、旧会话有损重建。
-- 锁：`~/.neo/run/locks/<id>` 与 mailbox `.alive` 互认；双开拒绝；路径从 id 重算，不信任 `meta.path`。
+- 锁：`~/.neo/run/locks/<id>/` 与 mailbox `.alive` 互认；`.alive` 缺失时用会话文件 mtime/hash 检测外部写入；双开拒绝；路径从 id 重算，不信任 `meta.path`。
 
 ### 5.2 对话
 
@@ -91,7 +91,7 @@
 ### 5.4 命令
 
 - 34 个行为：非交互 + 带参形式；菜单型走 `question.request`；长命令有进度/结果；`/clear` 发 `session.cleared`。
-- 结构化结果 `ViewBlock`（text/markdown/kv/list/table/diff/notice）。
+- 结构化结果：core 用领域块 `CommandBlock`，serve 映射为协议 `ViewBlock`（text/markdown/kv/list/table/diff/notice），fixtures 对齐。
 - 客户端专属（help/last/exit/输入）不进 core。
 - 命令目录 `commands.json` 单源 + 漂移守卫。
 
@@ -146,7 +146,7 @@
 6. 断线重连：attach 补齐/快照；epoch 不匹配强制快照；abort 状态一致。
 7. 崩溃恢复：kill -9 后对账、半轮 aborted、torn line 容错；旧会话可读。
 8. 守卫：import 边界、stdout/exit、单写者、catalog、脱敏、路径全绿。
-9. GUI 启动链 + 单会话联调（外仓验收；core 提供 conformance fixtures）。
+9. GUI 启动链 + 单会话：core 仓 conformance harness 绿（外仓 GUI smoke 仅补充）。
 10. `neo` 仓库不被修改；基线记录（1052/0/67 + PTY 21/21 evidence）。
 
 ---

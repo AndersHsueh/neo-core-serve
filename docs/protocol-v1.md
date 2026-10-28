@@ -56,9 +56,9 @@ type ServerMessage =
 ```
 
 - `ready.user` 必填且含 `id/email/displayName/role`；本地模式 `{id:"local",email:"local@localhost",displayName:"Local",role:"owner"}`。
-- **seq**：session 级单调计数，由 **core 分配**（不是 serve），随 durable 事件持久化；serve 只透传。允许跳号（delta 合批）。
+- **seq**：session 级单调计数，由 **core 分配**（不是 serve），**只随 durable 事件递增并持久化**；ephemeral 事件不消耗计数器，携带**当前 durable seq**（信封里仍有 seq，值可重复）。`server.seq` / `snapshot.seq` 一律指**最高 durable seq**。
 - **epoch**：session 打开时生成的随机串（16 hex），写入该 session 的 transcript 头；`ready/snapshot` 都带。
-  - `session.attach{lastSeq, epoch?}`：epoch 不匹配或 `lastSeq > server.seq` → **强制快照**；否则按 transcript 补齐。
+  - `session.attach{lastSeq, epoch?}`：epoch 不匹配或 `lastSeq > server.seq（最高 durable seq）` → **强制快照**；否则按 transcript 补齐 durable 事件。
   - 崩溃重启：seq 从最后一个 durable 事件继续；epoch 不变（同一 transcript）；transcript 丢失/重建 → 新 epoch。
 - 客户端必须：每次收到帧都更新 `lastSeq` 与 `epoch`（GUI 现状未更新，属客户端 bug，见 §7）。
 - `sessions/settings/usage` 三种 kind 只用于服务端主动推送；查询结果放 `result.data`。
@@ -71,7 +71,8 @@ type ServerMessage =
 
 | 命令 | 参数 | 回执 data | v0 |
 |---|---|---|---|
-| `ping` | — | — | ✅ `pong` |
+| `ping` | — | — | ✅ `pong`；**liveness**：有 pending 审批/提问时，owner 任何帧（含 ping）都续期 deadline；客户端在 pending 时建议 ≤60s ping 一次 |
+| `auth.login` / `auth.logout` / `auth.whoami` | — | — | ⚠️ HTTP/dev-only：`--dev-auth` 下由 HTTP 处理；WS 上返回 `unsupported`（v1 保留命令名，避免 vendored union 缺类型） |
 | `session.list` | — | `{sessions: SessionMeta[]}` | ✅ 唯一会话 shim |
 | `session.create` | `title?`, `cwd?` | `{sessionId}` | ✅ 单会话返回当前 id；否则 `conflict` |
 | `session.attach` | `sessionId?`, `lastSeq?`, `epoch?` | `{role}` + `snapshot` | ✅ |
@@ -131,7 +132,7 @@ type ServerMessage =
 | `approval.request` | `blockId, at, tool, detail, toolCallId?, path?, diff?, deadlineAt?, subagent?` | `blockId`=线格式请求 id；`diff` 可为 `null` |
 | `approval.resolve` | `blockId, state:"allowed"\|"denied", by` | `by:"user"\|"timeout"\|"no_client"\|"crash"\|"shutdown"\|"abort"` |
 | `question.request` | `blockId, at, prompt, options:{key,label,description?}[], header?, context?, multiSelect?, allowCustom?, deadlineAt?, subagent?` | |
-| `question.resolve` | `blockId, key?, keys?, custom?, answerLabel?, by` | `by` 同上 |
+| `question.resolve` | `blockId, at, key?, keys?, custom?, answerLabel?, by` | `at` 新增（确定性 reducer）；`key` 兼容旧客户端 |
 | `tier.switch` | `from, to, reason, at` | 首个 LLM 请求前发出 |
 | `stats` | `blockId, turnId, at, durationMs, usage, cumulativeUsage?, toolCalls, iterations, tier, contextUsage?, finishReason?, error?, emptyResponse?, provider?, model?` | **stats = 正常轮末** |
 | `banner` | `blockId, at, level, text` | 需要留痕的提示（压缩结果/重试/警告） |
@@ -139,7 +140,8 @@ type ServerMessage =
 | `session.status` | `status` | idle/working/waiting/stalled/dead |
 | `context` | `context:{used,limit,compactAt}` | |
 | `peer.update` | `peers[]` | 跨会话状态（capability `peers`） |
-| `error` | `blockId?, code, message, retryable` | 不终止进程 |
+| `error` | `blockId, at, code, message, retryable` | 不终止进程；`blockId/at` 必填以保证 reducer 可确定性重放（旧客户端可忽略） |
+| `auth.expired`（保留） | — | v1 union 保留；v0 静态 token 不发送 |
 | `turn.aborted`（new） | `turnId, blockId?, at, reason:"user"\|"crash"\|"shutdown"` | **终止轮**，与 stats 二选一 |
 | `compact.start` / `compact.end`（new） | `blockId, at; end 带 beforeTokens/afterTokens` | |
 | `command.result`（new） | `blockId, name, ok, blocks?, changes?, error?` | blocks 见 §6.1 |
@@ -155,7 +157,7 @@ type ServerMessage =
 | `activity`（new） | `phase:"llm"\|"tool"\|"approval"\|"compact", since` | 等待相位（capability `activity`） |
 | `notice`（new） | `level:"info"\|"warn"\|"error", text` | 瞬时提示（不重放） |
 
-- 仍带外层 `seq`；合批允许跳号。
+- 仍带外层 `seq`（= 当前最高 durable seq，**不推进计数器**）；合批不产生跳号；客户端只用它检测 transcript 重建。
 - 重连不重放 ephemeral；靠 `snapshot.live` + 后续事件恢复。
 
 ### 5.3 一轮的终态
@@ -216,12 +218,12 @@ type ViewBlock =
 
 ```ts
 SessionSnapshot = {
-  meta: SessionMeta; seq: number; epoch: string;
+  meta: SessionMeta; seq: number; epoch: string;   // seq = 最高 durable seq
   blocks: TranscriptBlock[];
   context: { used: number; limit: number; compactAt: number };
   lastTurn?: StatsBlock;
   pendingApprovalId?: string; pendingQuestionId?: string;
-  live?: {                                   // capability snapshot.live
+  live?: {                                   // capability snapshot.live；blocks 已含 partial 块，live 只标记相位
     turnId: string;
     assistant?: { blockId: string; text: string };
     reasoning?: { blockId: string; text: string };
@@ -235,6 +237,7 @@ SessionSnapshot = {
   - 无 lastSeq / epoch 不符 / lastSeq > server.seq → 完整快照。
   - 有 lastSeq 且可补齐 → 回放 `seq > lastSeq` 的 durable 事件；再发 `live`。
   - 无法补齐（transcript 被清理）→ 快照。
+- **mid-turn attach 的 blocks 必须包含进行中的块**：assistant/reasoning/tool 的 partial 块以真实 `blockId` 出现在 `blocks` 里（文本为当前 partial），`live` 只用于标记相位；客户端不得丢弃这些 blockId 的后续 delta/end。
 - 客户端 hydrate：保留未被快照覆盖的本地乐观消息（按 `clientId`）。
 
 ---
@@ -253,6 +256,11 @@ SessionSnapshot = {
 | 8 | `SessionMeta.mode` | **是**（类型 + 显示） |
 | 9 | `mode.set` 命令 | **是**（模式切换改走它） |
 | 10 | 客户端必须追踪 seq/epoch | **是**（`app.ts:145/231`） |
+| 10b | `error` 新增必填 `blockId/at`；`question.resolve` 新增 `at` | **是**（guards/reducer；旧 `Date.now()` 改为读事件） |
+| 10c | `snapshot.live` 的 blocks 已包含 partial 块 | **是**（hydrate 不再合成；未知 block 的 delta 需 upsert） |
+| 10d | `ping` 语义 = liveness（pending 时续期） | **是**（pending 时 ≤60s ping） |
+| 10e | 新增错误码 `question_expired`/`slow_consumer`（GUI `ERROR_KEYS` 需补） | **是** |
+| 10f | `auth.expired` 保留（v0 不发）；`auth.*` 命令名保留（WS 返回 unsupported） | **是**（types union 不删） |
 | 11 | 未知事件不得导致断连 | **是**（`guards.ts:80`） |
 | 12 | 本地 token（保留 dev 登录） | **是**（登录层 endpoint/凭据） |
 | 13 | 附件/图片延后；`turn.send` 只 text | v0 不做 |
@@ -273,7 +281,7 @@ SessionSnapshot = {
 
 ## 9. 流控与背压
 
-- delta 合批：16ms 或 4KB；同 block 合并，保留最新 seq（允许跳号）。
+- delta 合批：16ms 或 4KB；同 block 合并，保留当前 durable seq（不推进、不跳号）。
 - 每连接队列 512 帧 / 8MB；超限先丢 ephemeral，仍超限断开 4408。
 - 客户端重连退避 300ms × 2^n，封顶 5s + jitter。
 

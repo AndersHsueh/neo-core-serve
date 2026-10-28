@@ -38,7 +38,7 @@
 | **C0 协议冻结 + 骨架** | 冻结 v1.1、抽出 reducer/fixtures、命令目录 schema、工程骨架 | protocol 单测绿；四份文档一致 | 3d |
 | **C0b 纯核心移植** | 只搬**无 ui 依赖**的模块与测试；守卫第一层 | tsc + 纯核心测试绿 | 4d |
 | **C1 端口与事件化** | ports、tools 解耦、agent 事件化、组合根、命令层、golden | 无 TTY 进程内完整一轮 + 命令黄金样本 | 15d |
-| **C2 协议与服务** | serve/WS/stdio、session shims、持久化/锁/恢复、e2e、GUI conformance | PRD 验收 1–8；GUI 单会话联调 | 16d |
+| **C2 协议与服务** | serve/WS/stdio、session shims、持久化/锁/恢复、e2e、conformance harness | PRD 验收 1–8；A9 机械通过；GUI smoke | 16d |
 | **C3 硬化与发布** | 混沌、打包/停止/状态、安全、文档、v0.1.0 | verify ALL GREEN + tag | 9d |
 | **C4 本地 Hub v0.5** | 注册表 + worker 池 + `session.*` 全量 | GUI 多会话；worker 崩溃恢复 | 15d |
 | **C5 CLI 切换**（另立） | CLI 纯客户端化 | CLI 不再内嵌 runtime | 10d+ |
@@ -54,12 +54,12 @@
 
 | ID | 任务 | 产出 | 验收 |
 |---|---|---|---|
-| C0.1 | 基线固化：把 §1 数字写入 `docs/evidence/baseline.txt`；记录 neo/协议源 commit | evidence | 可复跑 |
-| C0.2 | 协议抽取：从 `neo-agent-app` 复制 types/guards/fixtures；从 `gui/src/state/session.ts` **提取纯 `applyEvent`** 到 `protocol/reducer.ts`；补 reducer fixtures | `src/protocol/**` | protocol 单测绿（正/坏样本 + reducer） |
+| C0.1 | 基线固化：把 §1 数字写入 `docs/evidence/baseline.txt`；记录 neo/协议源 commit；跑**传递依赖扫描**（含 system-prompt → tools → ui 这类间接依赖） | evidence + `scripts/deps-scan.ts` | 可复跑 |
+| C0.2 | 协议抽取：从 `neo-agent-app` 复制 types/guards/fixtures；从 `gui/src/state/session.ts` **提取纯 `applyEvent`** 到 `protocol/reducer.ts`（禁止 `Date.now()`：`error.blockId/at`、`question.resolve.at` 由事件提供）；补 reducer fixtures（固定时钟） | `src/protocol/**` | protocol 单测绿（正/坏样本 + reducer 确定性） |
 | C0.3 | 协议冻结评审：按 `protocol-v1.md` §1 冻结判别名；`commands.json` schema + 生成器设计；文档一致性（PRD/架构/协议/计划 同一 commit） | 冻结记录 + 四文档 diff | 无重命名/无第二套命令 |
 | C0.4 | 工程骨架：`package.json`(bun)、`tsconfig`、`.gitignore`、`scripts/verify.sh`、目录占位 | 可 `tsc`/`test` 的空项目 | 空跑绿 |
 | C0.5 | provenance 修订：补 `sessionName/sessionExport/input/references` 的处置（移植/重写/延后）；删除不存在的假设（如 `scripts/probe`） | `provenance.md` | 清单与代码一致 |
-| C0.6 | CI 与 docs:check 最小版：基线比对、协议 lock、`commands.json` 存在性、文档互链 | `scripts/verify.sh`、`scripts/docs-check.ts` | 故意违规变红 |
+| C0.6 | CI 与 docs:check 最小版：基线比对、协议 lock、`commands.json` **schema**（C1.7 前允许不存在）、文档互链 | `scripts/verify.sh`、`scripts/docs-check.ts` | 故意违规变红 |
 
 **验收 C0**：protocol 单测绿；四份文档一致；命令目录 schema 定稿；provenance 无虚构。
 
@@ -88,7 +88,7 @@
 | C1.4 | tools 解耦：`ToolOutcome{output,ok,truncated,outputRef,diff}`；注册表/dispatch 去 ui；`outputRef` 不透明 id + TTL | `core/tools/**` | tool 测试绿 |
 | C1.5 | Agent 事件化：去 ui/render/theme/isTTY；delta/end.text 权威；审批/提问走 port；子代理 `subagent` 标记 + notice 节流 | `core/agent/**` | 单测 + golden |
 | C1.6 | 组合根：`createSession({cwd,mode,tier,resume,ports})`；`loadConfig({cwd})`（修 process.cwd 依赖）；锁/心跳/mailbox 顺序 | `core/session/**` | 无 TTY 起会话 |
-| C1.7 | 命令层：`Command`/`CommandContext`/`CommandOutcome`+ViewBlock；迁移 34 个行为；交互改 question/approval；`commands.json` 生成器 + 漂移守卫 | `core/commands/**` | 命令黄金样本 |
+| C1.7 | 命令层：`Command`/`CommandContext`/`CommandOutcome`+**领域块 CommandBlock**；迁移 34 个行为；交互改 question/approval；`commands.json` 生成器 + 漂移守卫；开启 docs:check 的 catalog 存在性 | `core/commands/**` | 命令黄金样本 + catalog 绿 |
 | C1.8 | fake-LLM 模块化 + probe 客户端；golden：clock/id/random 注入，同输入同事件序列 | `tests/golden/**` | 确定性通过 |
 
 **验收 C1**：无 TTY 进程内完整一轮（流式/工具/审批/提问/命令/compact）；golden 稳定；core 零 ui 依赖；守卫全量激活。
@@ -103,9 +103,9 @@
 | C2.2 | WS/stdio/auth：token、Origin、`--dev-auth`、`/health`、4401/4408；`core.json` 原子写 + 单实例 | `serve/**`、`main.ts` | A1/A9 部分 |
 | C2.3 | session shims：list/create/attach/detach/rename/close；settings.get 映射；settings.patch(unsupported)；usage.summary 空；mode.set | `serve/commands/**` | GUI 启动链可跑 |
 | C2.4 | 持久化：transcript(header/epoch/seq)、turn.start{msgCount}、messages 原子写、轮末对账、崩溃修复、torn line、陈旧 transcript 重建算法 | `core/persist/**` | A6/A7 |
-| C2.5 | 锁与共存：`run/locks` 契约 + 与 neo CLI mailbox `.alive` 互认；session 路径从 id 重算（不信 meta.path）；日志分区；maintenance 边界 | `core/session/lock.ts`、ops 文档 | 双开/接管/清理 |
+| C2.5 | 锁与共存：`run/locks/<id>/` + 与 neo CLI mailbox `.alive` 互认；`.alive` 缺失时用 session 文件 mtime/hash 检测外部写入；路径从 id 重算；日志分区；maintenance 边界 | `core/session/lock.ts`、ops 文档 | 双开/接管/清理 |
 | C2.6 | 审批/提问 RPC：注入 Timer；owner 在线滑动 deadline、断线宽限、无客户端立即收敛；`by` 全枚举；allow-session 仅写文件 | `serve/approvals.ts` | A3/A4 |
-| C2.7 | e2e：stdio 完整轮/审批/提问/abort/重连/崩溃；GUI conformance harness（fixtures + dummy 场景） | `tests/e2e/**` | A2/A5/A6/A9 |
+| C2.7 | e2e：stdio 完整轮/审批/提问/abort/重连/崩溃；**in-repo GUI conformance harness**（fixtures + dummy 场景 + reducer 一致性）；GUI 手工 smoke 仅作补充 | `tests/e2e/**` | A2/A5/A6/A9（机械） |
 | C2.8 | **GUI 适配（外仓，并行）**：guards 放未知事件、ready/user、seq 追踪、dev 登录、mode、snapshot.live、命令 catalog 同步 | `neo-agent-app` 改动清单 | GUI 启动 + 单会话 |
 | C2.9 | 导入/迁移：备份、只读导入旧会话、`matrix-core import`；旧 CLI 与 core 交替使用的对账 | `main.ts import` | 老会话可开 |
 
@@ -164,10 +164,10 @@
 | A6 | 断线重连 + abort 一致性 + epoch 检查 | C2 |
 | A7 | 崩溃恢复（kill -9）+ 旧会话兼容 + torn line | C2/C3 |
 | A8 | 守卫：import/stdout/exit/单写者/catalog/脱敏/路径 | C0b/C1/C3 |
-| A9 | GUI 启动链 + 单会话联调（外仓） | C2 |
+| A9 | GUI 启动链 + 单会话：**conformance harness 绿**（外仓手工 smoke 仅补充） | C2 |
 | A10 | GUI 多会话 + worker 崩溃恢复 | C4 |
 
-> 外部 neo 闸门不在 core CI 里跑；core 只保证「不改 neo」+ 基线记录。A9 由 GUI 仓 e2e/手工联调，core 侧提供 conformance fixtures。
+> 外部 neo 闸门不在 core CI 里跑；core 只保证「不改 neo」+ 基线记录。A9 的出口是 core 仓的 **conformance harness**（fixtures + dummy 场景 + reducer 一致性）；GUI 仓的 e2e/手工 smoke 只作补充。
 
 ---
 

@@ -12,6 +12,7 @@ matrix-core serve --cwd <项目目录> [--resume <id>]
                   [--port 0] [--mode ask] [--tier default]
                   [--stdio] [--token-file <path>] [--dev-auth]
 matrix-core status | stop | doctor | version
+# 客户端在 pending 审批/提问时每 ≤60s 发 ping（liveness，续期 deadline）
 matrix-core import <session-id>     # 只读导入旧会话（不写 transcript）
 ```
 
@@ -68,7 +69,7 @@ matrix-core doctor --cwd <dir>
 |---|---|
 | 连不上 | `core.json` 是否存在/pid 是否存活/token 权限/端口/Origin |
 | 401 | token 轮换（重启）→ 客户端重读 |
-| 会话被锁 | 确认无进程后清理 `run/locks/<id>`；或等 pid/心跳过期回收 |
+| 会话被锁 | 确认无进程后清理 `run/locks/<id>/`；或等 pid/心跳过期回收 |
 | `session_gone` | 锁/文件不匹配；`--resume <id>` 重建 |
 | 卡在 working | `logs/core`/`logs/turns`；审批是否 pending；LLM 连通 |
 | 崩溃恢复 | 启动自动对账 + 补 `turn.aborted{crash}`；检查 messages/transcript 尾部 |

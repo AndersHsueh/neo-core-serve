@@ -39,8 +39,9 @@ a832b2433427faad9e96d187b9077d27aa2eca125d6ace7f73ded25cc0a536d7  gui/src/protoc
 | mailbox | `src/mailbox/` | 原样（身份/锁/心跳） |
 | env | `src/env/` | 原样 |
 | skills | `src/skills.ts` | 原样 |
+| （不搬）system-prompt | `src/system-prompt.ts` | **C1 再搬**：它 value-import `toolNames` → tools → ui，C0b 会编译不过；C1 先拆 `toolNames` 纯常量或改注入 |
 | session | `src/session.ts` | C1/C2 增加 transcript/锁/路径重算；图片 `$ref` 逻辑保留 |
-| system-prompt | `src/system-prompt.ts` | 原样 |
+
 | checkpoint | `src/checkpoint.ts` | 原样；C1 接 PathPolicy |
 | shell | `src/shell.ts` | 原样（唯一真源规则继续） |
 | contextWindow | `src/contextWindow.ts` | 原样 |

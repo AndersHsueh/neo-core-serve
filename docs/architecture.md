@@ -95,14 +95,14 @@ matrix-core/
 
 ### 5.2 seq 与 epoch
 
-- 每个 session 一个单调 `seq`，由 core 的 EventSink 分配；每个 durable 事件连同 seq 落 transcript。
+- 每个 session 一个单调 `seq`，由 core 的 EventSink 分配；**只有 durable 事件推进并落 transcript**。
+- ephemeral 事件不推进计数器，信封里的 seq = 当前最高 durable seq（可重复）；客户端只用它检测 transcript 重建。
 - 重启后 seq 从最后一个 durable 事件继续；epoch 不变（同一 transcript）。
-- transcript 丢失/重建 → 新 epoch；`attach{lastSeq,epoch}` 不匹配 → 强制快照。
-- ephemeral 事件也占 seq，但不落盘；因此客户端 `lastSeq` 可能大于盘的 seq。**规则：`lastSeq > server.seq` 或 epoch 不符 → 快照。**
+- transcript 丢失/重建 → 新 epoch；`attach{lastSeq,epoch}` 不匹配或 `lastSeq > 最高 durable seq` → 强制快照。
 
 ### 5.3 合批与背压
 
-- serve 合批 delta：16ms 或 4KB；同一 block 合并，保留最新 seq（允许跳号）。
+- serve 合批 delta：16ms 或 4KB；同一 block 合并；ephemeral 不推进 seq，durable seq 连续。
 - 每连接队列 512 帧 / 8MB；超限先丢 ephemeral，仍超限断开 4408。
 - 客户端重连：指数退避 300ms × 2^n（≤5s + jitter）；attach 成功后补发/快照。
 
@@ -128,10 +128,10 @@ matrix-core/
               └──────┘           └────────┘   resolve/abort └────┘
 ```
 
-- **starting**：加载配置 → env → memory → mailbox → 锁 → session/transcript → 工具注册 → ready。
+- **starting**：加载配置 → env → memory → mailbox → 锁（与 mailbox `.alive` 互认）→ session/transcript → 工具注册 → ready。
 - **working**：Agent 循环；拒绝第二个 `turn.send`（`conflict`）。
 - **waiting**：挂起审批/提问；`deadlineAt` 是安全网（见 §8）。
-- **closing**：停止收帧 → abort → memory.flush → persist → 释放锁。
+- **closing**：停止收帧 → abort → memory.flush → persist → 释放锁（同时释放自己持有的锁；不主动删 `.alive`，除非本进程创建）。
 - **dead**：锁失效/心跳超时；新进程可接管。
 
 **崩溃与中断**：
@@ -154,18 +154,21 @@ matrix-core/
   run/
     core.json                  # url/pid/tokenFile/sessionId/epoch
     core.token                 # 0600
-    locks/<id>.lock/           # mkdir 独占；owner.json{pid,epoch,startedAt}
+    locks/<id>/                # mkdir 独占；owner.json{pid,epoch,startedAt}
   logs/core/<date>.jsonl       # 结构化日志
   mailbox/ env/ ...            # 沿用
 ```
 
 ### 7.2 写序
 
-1. durable CoreEvent → append transcript（含 seq）。
-2. 轮末：`repairMessageTail()` → messages 写 `*.tmp` → `rename`（原子）。
-3. 更新 meta（lastTurnId/turns/updatedAt）随 2 一起写。
-4. 若 2 成功而 3 前崩溃：恢复时以 messages 为准，补 stats（视为完成）。
-5. 若 transcript 有 `turn.start` 无终态、messages 未变：补 `turn.aborted{crash}`，视图截断到 msgCount。
+1. **轮中**：durable 的非终态事件（turn.start/tool.*/approval/question/assistant.end 等）→ append transcript（含 seq）。
+2. **轮末**：`repairMessageTail()` → messages 写 `*.tmp` → `rename`（原子）；同时更新 meta（lastTurnId/turns/lastTurn/updatedAt）。
+3. **轮末之后**：写**终态事件** `stats`（正常/错误）或 `turn.aborted`（中断）。终态事件不早于 messages。
+4. 恢复对账：
+   - `meta.lastTurnId` == transcript 尾部 `turn.start.turnId` 且终态缺失 → 用 `meta.lastTurn` 补写 `stats`（视为完成）。
+   - `meta.lastTurnId` != transcript 尾部 turnId（messages 已提交但 transcript 只有半轮）→ 以 messages 为准，补 `turn.aborted{crash}` 或按已完成处理；**绝不产生两个终态**。
+   - transcript 有 `turn.start` 无终态、messages 未变（msgCount 后无新增）→ 截断视图、补 `turn.aborted{crash}`。
+5. 终态唯一性由 `turnId` 去重：同一 turn 只能有一个 `stats` 或 `turn.aborted`。
 
 ### 7.3 恢复
 
@@ -185,7 +188,7 @@ matrix-core/
 ### 8.2 超时语义
 
 - **deadline 是安全网，不是用户计时器**：
-  - owner 在线且心跳正常：deadline 滑动延长（默认 30min，每次 attach/heartbeat +30min），避免"看 diff 超时"。
+  - owner 在线：deadline 滑动延长（默认 30min；owner 的任意帧、`ping`、attach 都续期）；客户端在 pending 时应 ≤60s `ping` 一次（`ping` 定义为 liveness），避免"看 diff 超时"。
   - owner 断开：60s 宽限后默认拒绝/取消。
   - 无客户端（headless/mailbox 轮）：立即按策略拒绝/取消（不挂起）。
 - 默认策略：审批 deny、提问 cancel；可在配置里改。
@@ -262,7 +265,7 @@ interface AgentDeps {
 
 - `Command {name, aliases, group, args, run(ctx,args,signal)}`。
 - `CommandContext`：session/config/events/approvals/questions/checkpoint/memory/mailbox/logger/cwd/signal。
-- `CommandOutcome { ok; blocks: ViewBlock[]; changes?; error? }`；交互走 `ctx.ask/askUser/approve`。
+- `CommandOutcome { ok; blocks: CommandBlock[]; changes?; error? }`：core 定义**领域块** `CommandBlock`；serve 映射为协议 `ViewBlock`，两者形状由 fixtures 对齐（禁止 core import protocol）。
 - 长命令：`command.progress` + `command.result`；取消用 `command.cancel`（v1.2）。
 - 客户端专属命令（help/last/exit/输入层）不进 core。
 - 构建时生成 `protocol/commands.json`；客户端 vendor + 守卫。
@@ -292,7 +295,7 @@ matrix-core serve [--cwd DIR] [--resume ID] [--port 0]
 ```
 
 - 启动写 `~/.neo/run/core.json`（url/pid/tokenFile/sessionId/epoch）。
-- **锁**：`run/locks/<id>.lock/`（mkdir 独占 + owner.json）；与 mailbox `.alive` 独立（mailbox 可能被配置关闭），但语义一致：pid + 心跳 + 过期回收。
+- **锁**：`run/locks/<id>/`（mkdir 独占 + owner.json）；与 mailbox `.alive` **互认**：任一存在即拒绝双开（D15）。`.alive` 缺失（如 `-p` 非交互 CLI）时，core 仍持自己的锁，并在打开/落盘前校验会话文件未被外部改动（mtime/hash），发现变化 → `session_gone`。
 - 关闭：SIGTERM/SIGINT → abort → 修复 → flush → persist → 释放锁（10s 宽限，二次信号强退）。
 
 ### 13.2 v0.5 Hub
