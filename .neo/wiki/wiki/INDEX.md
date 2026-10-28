@@ -1,7 +1,7 @@
 # neo-core-serve 知识库 — 索引
 
 > 内容导向的目录：每个主题页一行，给出链接、一句话摘要与元数据。
-> 最后更新:2026-10-28
+> 最后更新:2026-10-29
 
 ## 一句话定位
 
@@ -9,7 +9,7 @@
 
 ## 当前状态
 
-**v0.0.2 已发布**（tag `v0.0.2`，commit `0eca093`）：PathPolicy/统一/WS 合批+fetch/Hub/附件，92 tests / 0 fail，verify ALL GREEN。下一阶段：与 `neo-agent-app` 联调、CLI 切换（C5）。
+**v0.0.2 已发布**（tag `v0.0.2` → commit `47bd5ef`）：PathPolicy/统一/WS 合批+fetch/Hub/附件，92 tests / 0 fail，verify ALL GREEN。下一阶段：与 `neo-agent-app` 联调、CLI 切换（C5）。
 基线：neo **1052 pass / 0 fail / 67 文件** + PTY 21/21（2026-10-28 实跑/evidence；`tests/README.md` 的 1051/1 是旧口径）。
 事实源：`docs/matrix-core-v0-prd.md`、`architecture.md`、`protocol-v1.md`、`work-plan.md`、`decisions.md`、`protocol-freeze.md`。
 
@@ -34,7 +34,13 @@
 | 主题 | 页面 | 一句话摘要 | 元数据 |
 |---|---|---|---|
 | v0.0.1 | [[发布-v0.0.1]] | 首个可独立运行单会话 core：WS/stdio、48 tests、协议 v1.1 冻结、锁/恢复/审批/命令子集 | tag `v0.0.1` |
-| v0.0.2 | [[发布-v0.0.2]] | PathPolicy/命令·路径·帧统一/Hub+worker/附件/WS 合批+fetch，92 tests，协议 v1.2 | tag `v0.0.2` |
+| v0.0.2 | [[发布-v0.0.2]] | PathPolicy/命令·路径·帧统一/Hub+worker/附件/WS 合批+fetch，92 tests，协议 v1.2 | tag `v0.0.2` → `47bd5ef` |
+
+### 会话汇总
+
+| 主题 | 页面 | 一句话摘要 | 元数据 |
+|---|---|---|---|
+| 2026-10-28 会话 | [[汇总-Matrix-Core-v0.0.2]] | 设计评审→C0→v0.0.1→v0.0.2 全记录：团队、决策、测试、simplify、风险、下一步 | 2026-10-29 |
 
 ### 迁移与开放问题
 
@@ -52,7 +58,7 @@
 - 决策：[`docs/decisions.md`](../../../docs/decisions.md)
 - 代码来源：[`docs/provenance.md`](../../../docs/provenance.md)
 - 运维：[`docs/ops.md`](../../../docs/ops.md)
-- GUI 接入：[`docs/gui-integration.md`](../../../docs/gui-integration.md)
+- GUI 接入：[`docs/gui-integration-v0.0.2.md`](../../../docs/gui-integration-v0.0.2.md)
 - 日志：[[log]]
 
 ## 维护提醒

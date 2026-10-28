@@ -1,10 +1,10 @@
 # 计划-Matrix-Core-v0
 
-> 最后更新:2026-10-28
+> 最后更新:2026-10-29
 
 ## 摘要
 
-v0 分五段：C0 协议冻结 + 骨架（3d）→ C0b 纯核心移植（4d，只搬无 ui 依赖模块；system-prompt 因间接依赖 tools/ui 放到 C1）→ C1 端口/事件化（15d）→ C2 协议与服务（16d，含 session shims、持久化/锁/恢复、e2e、in-repo conformance harness）→ C3 硬化（9d，混沌/打包/安全/v0.1.0）。v0 合计 **47 人日（≈9–10 周）**；v0.5 Hub 15d；CLI 切换（C5，10d+）另立。**当前进度：v0.0.2 已发布（PathPolicy/统一/批处理/Hub/附件；92 tests 全绿）；下一步：与 neo-agent-app 联调、CLI 切换（C5）。**基线：neo 1052 pass/0 fail/67 + PTY 21/21（2026-10-28 实跑/evidence）。详见 `docs/work-plan.md`。
+v0 分五段：C0 协议冻结 + 骨架（3d）→ C0b 纯核心移植（4d，只搬无 ui 依赖模块；system-prompt 因间接依赖 tools/ui 放到 C1）→ C1 端口/事件化（15d）→ C2 协议与服务（16d，含 session shims、持久化/锁/恢复、e2e、in-repo conformance harness）→ C3 硬化（9d，混沌/打包/安全/v0.1.0）。v0 合计 **47 人日（≈9–10 周）**；v0.5 Hub 15d；CLI 切换（C5，10d+）另立。**当前进度：v0.0.2 已发布（PathPolicy/统一/批处理/Hub/附件；92 tests 全绿）；C4 的 Hub 基础已随 v0.0.2 提前交付；下一步：与 neo-agent-app 联调、v0.0.3、CLI 切换（C5）。**基线：neo 1052 pass/0 fail/67 + PTY 21/21（2026-10-28 实跑/evidence）。详见 `docs/work-plan.md`。
 
 ## 里程碑
 
@@ -36,3 +36,4 @@ v0 分五段：C0 协议冻结 + 骨架（3d）→ C0b 纯核心移植（4d，�
 
 - 2026-10-28 初版：C0–C4（29d）。
 - 2026-10-28 评审修订：拆 C0/C0b；补 shims/持久化/锁/打包/迁移/确定性任务；工期改为 47d；基线 1052/0。
+- 2026-10-29 进度更新：v0.0.2 收口（92 tests，tag `47bd5ef`）；C4 基础 Hub 已交付，剩 idle/重启/租约/增量 attach 归 v0.0.3。

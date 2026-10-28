@@ -21,3 +21,5 @@
 ## [2026-10-28] milestone | v0.0.2 发布：PathPolicy/统一/WS 合批+transcript.fetch/Hub+worker/图片附件；92 pass/0 fail/ALL GREEN；commit 0eca093 / tag v0.0.2
 ## [2026-10-28] deliverable | simplify 三 reviewer（reuse/quality/efficiency），HIGH 全修（悬空 symlink/overflow owner/并发 attach/batcher 记账/too_large id 等）；剩余列 v0.0.3
 ## [2026-10-28] wiki | 新建 [[发布-v0.0.2]]，INDEX/计划同步；GUI 联调指南 docs/gui-integration-v0.0.2.md
+## [2026-10-28] deliverable | 今日会话汇总 [[汇总-Matrix-Core-v0.0.2]]：设计评审→C0→v0.0.1→v0.0.2；两次发布（48→92 tests）、团队分工、关键决策、simplify、风险与下一步
+## [2026-10-29] wiki | v0.0.2 最终指针校正为 `47bd5ef`（tag 含发布后文档校正）；INDEX 新增「会话汇总」、更新来源链接与计划页进度
