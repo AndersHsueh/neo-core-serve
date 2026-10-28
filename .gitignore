@@ -5,3 +5,8 @@ coverage/
 .DS_Store
 *.local
 .env
+*.tsbuildinfo
+
+# wiki 派生物与锁：能从 wiki 重建，不进版本控制
+.neo/wiki/outputs/
+.neo/wiki/.locks/

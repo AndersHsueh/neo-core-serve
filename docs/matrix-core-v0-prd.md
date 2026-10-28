@@ -1,23 +1,15 @@
-# Matrix-Core v0 —— PRD 与接口规格
+# Matrix-Core v0 —— PRD
 
-> 状态：draft v0.1 · 2026-10-28
-> 上游：`neo` v0.4.3（1052 tests / 67 files，PTY 21/21）· `neo-agent-app` 的 WS 协议原型 · `neo/docs/neo-deployment-target.html`
-> 范围：把 neo 的核心运行时抽成**可独立运行**的进程。云端、远程、多租户不在本期。
-> 纪律：本文是规格，代码实现以本文为准；冲突时先改本文再改代码。
+> 状态：draft v0.3 · 2026-10-28
+> 上游：`neo` v0.4.3（源提交 `1da7c6f`）· `neo-agent-app` 的 WS 协议原型（`a52f1f0`）
+> 下游：[architecture.md](architecture.md) · [protocol-v1.md](protocol-v1.md) · [work-plan.md](work-plan.md) · [decisions.md](decisions.md) · [ops.md](ops.md) · [gui-integration.md](gui-integration.md)
+> 范围：把 neo 的核心运行时抽成**可独立运行**的进程。云端、远程、多租户、CLI 切换不在本期。
 
 ---
 
 ## 0. 一句话
 
-**Matrix-Core = 一个不需要终端的 neo 核心进程。** 它跑 Agent 循环、工具、会话、记忆、信箱和斜杠命令，对外用 WS v1 说话。CLI 这一期**不改**，GUI 先接。
-
-```
-┌──────────┐   WS v1    ┌──────────────────────────────┐
-│  GUI     │──────────▶ │  Matrix-Core (v0: 单会话)     │
-├──────────┤            │  Agent / tools / memory /     │
-│  CLI     │  (v0 内嵌) │  mailbox / session / commands │
-└──────────┘            └──────────────────────────────┘
-```
+**Matrix-Core = 一个不需要终端的 neo 核心进程。** 它跑 Agent 循环、工具、会话、记忆、信箱和斜杠命令，对外用 WS v1.1 说话。core / CLI / GUI 三个仓库**完全独立**，只以协议 + fixtures + 文档为契约。
 
 ---
 
@@ -25,227 +17,164 @@
 
 ### 1.1 目标
 
-1. core 进程可在**无 TTY** 环境启动，跑完整一轮：流式正文/思维链 → 工具调用 → 审批/提问 → 命令 → 会话落盘。
-2. CLI 与 core **共用同一份核心代码**，不出现第二套 runtime。
-3. 对外协议复用 `neo-agent-app/gui/src/protocol` 的 v1 形状：子集 + 向后兼容扩展。
-4. 进程模型分两步：**v0 = 单会话**（一个进程 = 一个会话，即目标架构里的 worker）；**v0.5 = 本地多会话 Hub**（会话注册表 + 每会话一个 worker 子进程）。
-5. 现有闸门不被破坏：`neo` 的 1052 tests + PTY 21/21；core 新增协议契约测试与边界守卫。
+1. core 进程可在**无 TTY** 环境启动，跑完整一轮：流式 → 工具 → 审批/提问 → 命令 → 落盘。
+2. core 不 import `ui/`/`tui/`/`input/`，不读 stdout，不 `process.exit`（`main.ts` 白名单）。
+3. 协议沿用 GUI v1 的判别名，只做加法（v1.1）；GUI 作为第一个消费者，改动清单化。
+4. 进程模型：v0 单会话；v0.5 本地 Hub（注册表 + 每会话 worker）。
+5. 会话可恢复：崩溃后回到最后完成轮；半轮标记 aborted；messages 与 transcript 对账。
+6. **安全默认值**：路径约束（cwd 内）、密钥零外泄、输出脱敏、本地 token。
+7. 仓库独立：无 `file:`/workspace/submodule；客户端 vendor 协议 + conformance。
 
-### 1.2 非目标（本期明确不做）
+### 1.2 非目标
 
-- 云端、远程访问、多租户、OIDC/登录体系、对象存储、跨设备同步
-- CLI thin client 改造（默认仍内嵌 runtime；`--attach` 后续版本）
-- Windows 实机适配（PD-1 尚未验收）
-- 附件/图片协议（v0 只接收文本；图片与 @ 引用在 v0.1 补）
-- Tauri 壳、自动更新、分发打包
+- 云端、远程访问、多租户、OIDC、对象存储、跨设备同步
+- 多用户鉴权（仅本地 token + 可选 dev 登录）
+- CLI thin client 改造（neo 冻结；C5 另立）
+- Windows 实机（PD-1 未验收）
+- 附件/图片（v1.2）、Tauri 壳、分发签名
 
 ---
 
-## 2. 边界与代码归属
+## 2. 用户与场景
 
-### 2.1 归属表
+| 角色 | 场景 | 本期价值 |
+|---|---|---|
+| GUI（`neo-agent-app`） | 浏览器/Tauri 连本地 core，跑会话 | 第一个真实消费者，验证协议 |
+| 自动化/CI | `matrix-core serve --stdio` + probe | 无 TUI 验收、回归 |
+| CLI 用户（后续） | `neo` 连本地 core | C5 之后；本期保证协议就绪 |
+
+---
+
+## 3. 仓库与依赖（已定）
+
+- **完全独立**：禁止代码级依赖；唯一契约是 WS 协议 + fixtures + `commands.json` + 文档。
+- **代码来源**：从 neo `1da7c6f` 移植纯核心；协议从 app `a52f1f0` 抽取；reducer 从 `gui/src/state/session.ts` 提取。provenance 记录。
+- `neo` 冻结 v0.4.3（只 critical hotfix）；本仓为唯一真源。
+- 详见 decisions D1/D2/D3/D11。
+
+---
+
+## 4. 边界
 
 | 归属 | 内容 |
 |---|---|
-| **core** | `agent.ts` `llm.ts` `config.ts` `classifier/` `tools/` `memory/` `wiki/` `mailbox/` `env/` `skills.ts` `session.ts` `system-prompt.ts` `checkpoint.ts` `shell.ts` `contextWindow.ts` `turnDiagnostics.ts` `maintenance.ts` `runtimeTmp.ts` |
-| **client（留在 CLI/GUI）** | `ui/` `tui/` `input/` `attachments.ts` `paste.ts` `clipboard.ts` `hotkeys.ts`、入口 REPL、标题动画、readline/composer |
-| **shared（独立目录）** | `protocol/`：帧类型 + guards + fixtures（唯一事实源） |
+| **core** | agent/llm/config/classifier/tools/memory/wiki/mailbox/env/skills/session/system-prompt/checkpoint/shell/contextWindow/turnDiagnostics/maintenance/runtimeTmp/persist/commands + `sessionName`/`sessionExport` 的 core 版实现 |
+| **client** | ui/tui/input/attachments/paste/clipboard/hotkeys、REPL、标题动画、登录页 |
+| **shared** | protocol（types/guards/fixtures/reducer/commands.json） |
 
-### 2.2 硬规则（必须由守卫测试保证）
-
-1. `core/**` 不得 import `ui/`、`tui/`、`input/`、CLI 入口。
-2. `core/**` 不得读 `process.stdout.isTTY`；是否流式由调用方注入（`streaming: boolean`）。
-3. `core/**` 不得调用 `process.exit`、不得注册进程信号；生命周期归 `serve/` 或 CLI。
-4. 协议模式下 **stdout 只走帧**；日志/告警一律 stderr。
-5. 密钥只存在于 core 内存；`settings.get` 只返回掩码，协议永不携带明文 apiKey。
-
-> 现状依据：`agent.ts` 有约 40 处 `console.*` 直写、4 个 `ui/*` import、1 处 `process.stdout.isTTY`（`neo/src/agent.ts:661`）；`index.ts` 的 `main()` 约 1487 行，混着装配、REPL、命令与渲染。
+硬规则与守卫见 [architecture.md](architecture.md) §3。
 
 ---
 
-## 3. 仓库与依赖策略（待拍板）
+## 5. 功能范围（v0）
 
-现状：`neo` 是单仓（runtime + CLI + 测试）；协议原型在 `neo-agent-app/gui/src/protocol`。
+### 5.1 会话
 
-**推荐路径（分三步，避免同时改仓库边界和行为）：**
+- 单会话：`--cwd`、`--mode`、`--tier`、`--resume <id>`；启动参数覆盖 config。
+- 落盘：messages（LLM 真源）+ transcript（durable 事件 + epoch/seq）+ 单写者锁。
+- 崩溃恢复：对账 messages/transcript、半轮 aborted、torn line 容错、旧会话有损重建。
+- 锁：`~/.neo/run/locks/<id>` 与 mailbox `.alive` 互认；双开拒绝；路径从 id 重算，不信任 `meta.path`。
 
-1. **P0/P1 在 `neo` 内做**：抽 `src/app.ts`（组合根）+ `src/commands.ts`（命令实现）+ 核心事件化。测试网和 PTY 都在 `neo`，回归成本最低。
-2. **一次性机械迁移**：`git mv` 核心目录 + 对应测试到 `neo-core-serve/src/core/`；`neo/package.json` 增加路径依赖 `"matrix-core": "file:../neo-core-serve"`；CLI 改为 import。
-3. **协议源迁入 `neo-core-serve/src/protocol/`**：GUI 通过 path alias / `file:` 依赖消费同一份类型；fixtures 作为跨端契约测试。迁移期间 GUI 的 `protocol/` 只读，禁止双写。
+### 5.2 对话
 
-**备选：**
-- git submodule（可复现、但本地开发摩擦大）
-- 直接把核心搬到新仓开发（会牺牲现有测试网，不推荐）
+- 一轮：事件流、工具、审批、提问、abort、stats、context、compact。
+- 子代理：同进程隔离；审批/提问透传并带 `subagent` 标记；进度 notice 节流。
+- 上下文压缩、空响应重试、窗口探测（沿用 neo）。
 
-> 该决策影响目录结构与 CI，**落地前必须先确认**。本文档不假设最终形态。
+### 5.3 审批与提问
+
+- 审批：`ask/auto-edit/auto-all/plan`；`allow/deny/allow-session`；**allow-session 仅 write/edit（cwd 内），shell 永不内存放行**。
+- deadline 是安全网：owner 在线滑动延长；断线 60s 宽限；无客户端立即拒绝/取消。
+- 提问：单选/多选/自定义；选项 `{key,label}`；超时取消。
+- diff：write/edit 尽量提供；`diff` 可为 null，客户端需保护。
+
+### 5.4 命令
+
+- 34 个行为：非交互 + 带参形式；菜单型走 `question.request`；长命令有进度/结果；`/clear` 发 `session.cleared`。
+- 结构化结果 `ViewBlock`（text/markdown/kv/list/table/diff/notice）。
+- 客户端专属（help/last/exit/输入）不进 core。
+- 命令目录 `commands.json` 单源 + 漂移守卫。
+
+### 5.5 记忆 / wiki / 信箱 / 技能 / 环境
+
+- memory bridge：自动捕获/召回/蒸馏；`remember`。
+- wiki：`wiki_search`/`wiki_write`/`/wiki-lint`；`/ingest`（C4 后）。
+- mailbox：身份/心跳/`send_message`/`list_peers`/watchdog/`/peers`/`/inbox`。
+- skills：发现/加载/预算；`use_skill`。
+- env：本机探测 + prompt 注入；`/env`。
+
+### 5.6 配置与安全
+
+- **实际行为**：`loadConfig` 取第一个存在的 settings 文件（cwd → 包根 → `~/.neo`），不做跨文件合并；core 必须把**会话 cwd** 传进去（修 `process.cwd` 依赖）。
+- 协议/日志/transcript 不出现明文 key；`settings.get` 掩码；项目级明文 key 启动告警。
+- `PathPolicy`：所有文件操作 realpath + symlink + cwd 前缀；负样本测试。
+- `outputRef` 为不透明 id，不暴露路径；TTL 清理。
+- 本地 token 0600；WS Origin 白名单；`--dev-auth` 默认关。
 
 ---
 
-## 4. 接口规格 v0
+## 6. 非功能需求
 
-### 4.1 传输
-
-- **WS** `/ws`，JSON 文本帧；信封沿用原型：`ClientMessage/ServerMessage`，`v: 1`。
-- 本地监听 `127.0.0.1:<port>`（默认随机，写入 `~/.neo/run/core.json`）；**仍校验 token**（`~/.neo/run/core.token`），避免本机任意进程连入。
-- `--stdio`：同一帧格式按行分隔，供测试脚本 / PTY 使用；核心 handler 与传输无关（帧进 → 帧出）。
-- 错误：`result{ok:false,error:{code,message,retryable}}`；协议不兼容直接拒帧。
-
-### 4.2 客户端 → core（v0 子集）
-
-| 命令 | 参数 | 语义 |
-|---|---|---|
-| `ping` | — | 返回 `pong` |
-| `attach` | `lastSeq?` | 订阅当前会话；返回 `snapshot`。v0 单会话，重复 attach 幂等 |
-| `turn.send` | `text`, `clientId` | 发起一轮；运行中再发 → `conflict`（客户端自行排队） |
-| `turn.abort` | — | 中断当前轮，最终发 `turn.aborted` + `stats` |
-| `approval.resolve` | `blockId`, `decision: allow\|deny\|allow-session` | 回应写盘审批；挂起项不存在 → `approval_expired` |
-| `question.answer` | `blockId`, `keys: string[]`, `custom?` | 回应 `ask_user`；多选/自由输入 |
-| `command.run` | `name`, `args: string[]` | 执行斜杠命令；结果走事件（v0 不类型化） |
-| `settings.get` | — | 返回掩码后的设置视图 |
-
-延后：`session.list/create/close`、`usage.summary`、`auth.*`（v0.5+）。
-
-### 4.3 core → client（v0 子集）
-
-`ready` · `result{id}` · `snapshot{sessionId, seq, snapshot}` · `pong`
-
-事件（每条带 `sessionId`/`seq`，seq 单调）：
-
-| 事件 | 关键字段 |
+| 维度 | 要求 |
 |---|---|
-| `turn.start` | `turnId, blockId, n, at, userText?, clientId?` |
-| `assistant.start/delta/end` | `blockId, (at,tier) / text / （结束）` |
-| `reasoning.start/delta/end` | `blockId, text / durationMs, tokens` |
-| `tool.start/end` | `name, icon, arg / state, output, durationMs, truncated` |
-| `approval.request/resolve` | `tool, path?, detail, diff?, deadlineAt / decision` |
-| `question.request/resolve` | `prompt, options, multiSelect, allowCustom / keys, custom` |
-| `tier.switch` | `from, to, reason, at` |
-| `stats` | `durationMs, usage, toolCalls, iterations, tier, turnId` |
-| `context` | `used, limit, compactAt` |
-| `banner` | `level, text` |
-| `error` | `code, message, retryable` |
-| `session.meta/status` | 标题/模型/档位/模式/状态 |
-| **`turn.aborted`（新增）** | `turnId, at`（原型缺失，必须补） |
-
-**重连**：客户端 `attach{lastSeq}`；缺口小则补发事件，缺口过大则发全量 `snapshot`。
-
-**快照 v0 口径（有损，已知）**：session 文件只存 `messages`，所以重启后只能重建 `user/assistant/tool` 块与 `lastTurn`；思维链、工具原始输出、审批历史不可重建。完整事件日志留 v0.5。
-
-### 4.4 与原型协议的差异（v1.1，全部向后兼容）
-
-1. `approval.request.diff` 改为**可选**（neo 当前只有 `approve(tool, detail: string)`，工具层未透出结构化 diff；v0 传 `detail` + 空 diff）。
-2. `question` 增加 `keys[]` / `custom`（现有 `ask_user` 支持多选 + 自由输入；原型只有单选 `key`）。
-3. 新增 `turn.aborted`。
-4. `command.run` 仍只回 ack，命令输出走 `banner`/`assistant` 事件；结构化 `CommandResult` 留 v0.5。
-5. `Usage.costMicros` 置 0（neo 没有价格表）。
-6. 附件/图片不做；`turn.send` 只收 `text`。
-7. 本地 token 代替 `auth.login`；`auth.*` 事件与命令不做。
+| 启动 | 无 TTY 冷启动 < 200ms |
+| 流式 | delta 合批 16ms/4KB；端到端延迟 ≤ 现 CLI + 20ms |
+| 恢复 | kill -9 后回到最后完成轮；messages/transcript 对账；不丢已落盘消息 |
+| 稳定 | 8h 会话 RSS 增长 < 20%（跑一次 soak，不承诺 72h） |
+| 安全 | 路径不逃逸；密钥零外泄；协议/日志/transcript 扫描零命中 |
+| 兼容 | 协议 v1 内向后兼容；客户端 conformance 失败即拒绝连接 |
+| 可观测 | 结构化日志 + turn 诊断 + health/doctor；排障不靠猜 |
 
 ---
 
-## 5. 进程模型
+## 7. 协议概要（详见 protocol-v1.md）
 
-### 5.1 v0：单会话
-
-启动顺序（对齐现 `main()` 的装配顺序）：
-
-```
-flags(cwd/port/mode/tier/session) 
-  → loadConfig(cwd) → applyTier / switchProvider
-  → env / modelWindow 探测
-  → memory bridge
-  → mailbox identity + acquire .alive
-  → session create/resume（单写者）
-  → classifier
-  → Agent + registerTool(task/remember/ask_user/send_message/list_peers/wiki_*)
-  → serve（WS + 可选 stdio）
-```
-
-关闭：停止收帧 → abort 当前轮 → `memory.flush()` → `persist(session)` → release `.alive` → exit。
-
-- **单写者**：只有 core 进程写 session 文件；Hub（v0.5）只读注册表。
-- **崩溃**：v0 进程退出即会话结束；v0.5 由 Hub 负责重启与 turn 边界恢复。
-- **成本参考（实测）**：核心 6 模块冷 import 10–12ms / RSS 43MB，完整 CLI 启动 30ms —— worker 模型可行。
-
-### 5.2 v0.5：本地多会话 Hub
-
-- 会话注册表（id / cwd / 状态 / 最后活跃）→ 按需 spawn worker 子进程。
-- `session.list/create/attach/close`；attach 到磁盘旧会话 = spawn + resume。
-- worker 的 cwd/config/env 在 spawn 时确定（不能用进程级全局 env 覆盖多会话）。
-- worker stdout 只走协议，日志走 stderr；空闲回收 + 崩溃重启策略。
-
----
-
-## 6. 状态与配置
-
-| 项 | v0 口径 |
-|---|---|
-| settings 搜索 | `cwd/settings.json` → 包根 → `~/.neo/settings.json`（沿用 `config.ts` 现状）；会话 cwd 由启动参数决定 |
-| 用户级状态 | `~/.neo/`：sessions / mailbox / skills / env / logs / run |
-| 项目级状态 | `<cwd>/.neo/`：wiki / backups / tmp / exports |
-| 密钥 | 只进 core；`settings.get` 掩码；协议不携带 |
-| 会话身份 | core 进程 = 会话进程；`.alive` + pid + heartbeat 由 core 持有，CLI 断开不释放 |
-| 环境探测 | core 在本机采集（env probe 写 `~/.neo/env/<machineKey>.json`） |
-
----
-
-## 7. 命令支持矩阵（v0）
-
-| 分组 | 命令 | v0 策略 |
-|---|---|---|
-| 非交互（直接回结果） | `clear` `compact` `context` `cost` `history` `why` `tools` `env` `skills` `sessions` `export` `save` `checkpoints` `undo` `goal` `memory status/list` `remember` `tier`+别名 `auto` `rename` | 支持；输出走事件 |
-| 带参数即可（无菜单） | `mode <ask\|auto-edit\|auto-all\|plan>` `tier <名>` `provider <名>` `model <id>` `memory on/off` | 支持 |
-| 菜单型（改用 `question.request`） | `provider`/`model`/`mode`/`memory forget` 无参形式 | v0.1 实现；v0 先要求带参数 |
-| 延后 | `resume`（会话生命周期，v0.5）`ingest`（子代理 + 长任务）`inbox`（跨会话信箱）`last`（客户端内存）`init`（需 confirm，v0.1） | v0.5 / v0.1 |
-
-> 命令表与实现必须单一来源；CLI 与 GUI 的漂移守卫在迁移后继续覆盖（现 `tests/commands.test.ts` 扫的是 `index.ts`，迁移时要改指 `commands.ts`）。
+- 传输：WS `/ws` + 本地 token；`--stdio`；`/health`；`--dev-auth` 本地登录。
+- 命令：session.*（含 v0 shims）、turn.send/abort、approval.resolve、question.answer、command.run、settings.get/patch、mode.set、usage.summary、ping。
+- 事件：`turn.start`、`assistant.start/delta/end`、`reasoning.*`、`tool.start/end`、`approval.request/resolve`、`question.request/resolve`、`tier.switch`、`stats`、`banner`、`context`、`session.meta/status`、`peer.update`、`error`、`turn.aborted`、`compact.*`、`command.result`、`session.cleared`。
+- seq 由 core 分配并持久化；epoch 识别 transcript 重建；attach 支持补齐/快照；未知事件客户端降级。
 
 ---
 
 ## 8. 验收标准
 
-1. 无 TTY 启动：`GET /api/health` 正常，WS `ready`。
-2. 完整一轮（fake-llm + probe 客户端）：流式正文/思维链、工具调用、工具输出、`stats`、session 文件落盘。
-3. 审批：`write_file` 触发 `approval.request`；deny → 不写；allow → 写；**无响应 → 超时自动拒绝，进程不挂**。
-4. 提问：`ask_user` 触发 `question.request`；多选 + 自定义文本回传后，模型继续。
-5. 命令：`command.run: tier deep` 生效并广播 `tier.switch`；`clear/compact/context` 正常。
-6. 断线重连：`attach{lastSeq}` 拿到补齐事件或快照；运行中 abort 后状态一致。
-7. 守卫：core 目录 import 禁令、`process.stdout/exit` 禁令、协议 fixtures 契约测试全绿。
-8. `neo` 现有闸门不变：1052 tests + PTY 21/21 全绿（CLI 行为零变化）。
+1. 无 TTY 启动：`/health`、WS `ready`（user 含 email）。
+2. 完整轮：流式/思维链、工具、stats、messages + transcript 落盘。
+3. 审批：allow/deny/timeout/no-client；滑动 deadline；进程不挂。
+4. 提问：多选 + 自定义；取消路径正确。
+5. 命令：tier 切换 + 广播；clear/compact/context；结构化结果；`session.cleared`。
+6. 断线重连：attach 补齐/快照；epoch 不匹配强制快照；abort 状态一致。
+7. 崩溃恢复：kill -9 后对账、半轮 aborted、torn line 容错；旧会话可读。
+8. 守卫：import 边界、stdout/exit、单写者、catalog、脱敏、路径全绿。
+9. GUI 启动链 + 单会话联调（外仓验收；core 提供 conformance fixtures）。
+10. `neo` 仓库不被修改；基线记录（1052/0/67 + PTY 21/21 evidence）。
 
 ---
 
-## 9. 里程碑与估算（单人全职，±50%）
+## 9. 里程碑
 
-| 阶段 | 内容 | 估算 |
+见 [work-plan.md](work-plan.md)：C0 协议冻结 3d → C0b 纯核心移植 4d → C1 端口/事件化 15d → C2 协议服务 16d → C3 硬化 9d（v0 共 **47 人日**）→ C4 Hub 15d。C5 CLI 切换另立（10d+）。
+
+---
+
+## 10. 风险
+
+见 [work-plan.md](work-plan.md) §6。最高：移植隐性 UI 依赖、协议/GUI 对不齐、双仓漂移、路径逃逸、脱敏滞后、锁/共存。
+
+---
+
+## 11. 已决策 / 待决策
+
+**已决策**：D1 仓库独立、D2 移植、D3 协议源、D4 事件化、D5 单会话→Hub、D6 持久化/seq/epoch、D7 审批提问、D8 命令层、D9 本地鉴权、D10 版本、D11 neo 冻结、D12 文档/wiki 纪律、D13 路径策略、D14 脱敏边界、D15 共存/迁移。
+
+**待决策**：CLI 切换后的仓形态；远程项目边界；transcript 保留期；多客户端权限。
+
+---
+
+## 12. 修订记录
+
+| 日期 | 版本 | 变更 |
 |---|---|---|
-| P0 | 抽 `app.ts` + `commands.ts`；`agent.messages/mode` 方法化；审批超时/abort；命令表单一化；守卫改指 | 3–5 天 |
-| P1 | `streaming` 注入替代 isTTY；`ProtocolConsole`（AgentIO → 协议事件）；单会话 WS 服务 + token + health；审批/提问 RPC；命令子集 | 1.5–2.5 周 |
-| P2 | 核心事件化（去掉 agent 内渲染）；快照/重连稳定；命令输出结构化；守卫与契约测试补齐 | 1 周 |
-| v0.5 | 会话注册表 + worker 池 + `session.*` + attach/回收/重启；GUI 多会话可用 | 2–3 周 |
-
----
-
-## 10. 风险与对策
-
-| 风险 | 对策 |
-|---|---|
-| 两套 runtime 漂移 | 单一 core 代码；CLI 与 core 共用同一包；迁移后禁止复制 |
-| 协议与实现漂移 | `protocol/` 单源 + fixtures 契约测试；未知事件/命令拒绝 |
-| 会话文件双写 | 单写者 = core/worker；Hub 不写 session 文件 |
-| 审批挂起 | request id + turn 绑定 + `deadlineAt` 超时默认拒绝 + abort 兜底 |
-| 命令层仍带展示语义 | P0 先抽 `CommandContext`；P2 再拆「结构化结果 vs 客户端渲染」 |
-| 快照有损 | v0 明示；v0.5 加事件日志/块持久化 |
-| 密钥泄露 | 只在 core；协议只发掩码；日志脱敏 |
-| PTY 债务 | P0/P1 不动 PTY；v0.5 前把 PTY 改成 hub+client 双进程 |
-| 跨仓依赖摩擦 | 优先 `file:` 依赖 + 固定提交；CI 同时检两个仓 |
-
----
-
-## 11. 未决问题（需要拍板）
-
-1. **仓库依赖策略**：`file:` 依赖 / submodule / monorepo，三选一（见 §3）。
-2. **协议源归属**：迁到 `neo-core-serve/src/protocol`，还是留在 `neo-agent-app` 由 core 消费？
-3. **迁移时机**：P1 就在 `neo` 内做完再搬，还是提前搬（影响测试网）。
-4. **快照保真度**：v0 接受有损，还是先加事件日志？
-5. **附件/图片**：v0.1 做到什么程度（CLI 的粘贴图片是现有能力，不能长期缺失）。
+| 2026-10-28 | v0.1 | 初稿 |
+| 2026-10-28 | v0.2 | 改为独立仓库；协议源迁入本仓 |
+| 2026-10-28 | v0.3 | 按评审修订：判别名冻结、seq/epoch、恢复对账、审批 deadline 语义、路径/脱敏/共存、C0 拆分、基线 1052/0、工期 47d |
