@@ -9,6 +9,7 @@ import type {
   PermissionMode,
   SessionEvent,
   SessionMeta,
+  ImageAttachmentInput,
   SessionSnapshot,
   SettingsView,
   Usage,
@@ -43,11 +44,13 @@ export interface HostPort {
   usage(): { records: UsageRecord[]; totals: Usage };
   snapshot(): SessionSnapshot;
   live(): SessionSnapshot["live"];
-  send(text: string, refs: SendRef[] | undefined, clientId: string): Promise<{ turnId: string }>;
+  send(text: string, refs: SendRef[] | undefined, clientId: string, attachments?: ImageAttachmentInput[]): Promise<{ turnId: string }>;
   abort(turnId?: string): Promise<{ aborted: boolean }>;
   resolveApproval(blockId: string, decision: "allow" | "deny" | "allow-session"): boolean;
   answerQuestion(blockId: string, keys: string[], custom?: string): boolean;
   runCommand(name: string, args: string[]): Promise<CommandOutcome>;
+  /** v0.0.2：durable 事件回放（fromSeq 不含） */
+  fetchTranscript(fromSeq?: number, limit?: number): { events: Array<{ seq: number; event: SessionEvent }>; nextSeq?: number };
   setMode(mode: PermissionMode): Promise<void>;
   rename(title: string): void;
   close(): Promise<void>;

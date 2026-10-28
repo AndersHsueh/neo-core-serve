@@ -89,16 +89,17 @@ export async function makeDirs(name: string): Promise<TestDirs> {
 }
 
 /** 确定性 settings.json：provider 指向 fake LLM；memory/env 关闭减少副作用。 */
-export function fakeSettings(baseUrl: string): Record<string, unknown> {
+export function fakeSettings(baseUrl: string, providerName = "fake"): Record<string, unknown> {
   const model = FAKE_MODEL;
+  const p = providerName;
   return {
-    default_provider: "fake",
+    default_provider: p,
     default_model_tier: "default",
-    classifier_provider: "fake",
+    classifier_provider: p,
     classifier_model_name: model,
     providers: [
       {
-        provider_name: "fake",
+        provider_name: p,
         provider_type: "openai",
         base_url: baseUrl,
         api_key: FAKE_API_KEY,
@@ -112,10 +113,10 @@ export function fakeSettings(baseUrl: string): Record<string, unknown> {
       },
     ],
     model_routes: {
-      default: { provider: "fake", model },
-      balanced: { provider: "fake", model },
-      fast: { provider: "fake", model },
-      deep_reasoning: { provider: "fake", model, fallback_allowed: true },
+      default: { provider: p, model },
+      balanced: { provider: p, model },
+      fast: { provider: p, model },
+      deep_reasoning: { provider: p, model, fallback_allowed: true },
     },
     compact_threshold: 0.75,
     max_tool_iterations: 8,
@@ -130,8 +131,29 @@ export function fakeSettings(baseUrl: string): Record<string, unknown> {
   };
 }
 
-export async function writeSettings(dirs: TestDirs, baseUrl: string): Promise<void> {
-  await writeFile(join(dirs.work, "settings.json"), `${JSON.stringify(fakeSettings(baseUrl), null, 2)}\n`, "utf8");
+export type SettingsMode = "cwd" | "home" | "none";
+
+/**
+ * 写确定性 settings.json。
+ *  - cwd（默认）：<work>/settings.json（loadConfig 第一优先级）；
+ *  - home：<HOME>/.neo/settings.json（真实用户级回落路径，cwd 故意不放）；
+ *  - none：都不写（配置只靠 NEO_* 环境变量）。
+ */
+export async function writeSettings(
+  dirs: TestDirs,
+  baseUrl: string,
+  opts: { mode?: SettingsMode; providerName?: string } = {},
+): Promise<void> {
+  const mode = opts.mode ?? "cwd";
+  if (mode === "none") return;
+  const content = `${JSON.stringify(fakeSettings(baseUrl, opts.providerName ?? "fake"), null, 2)}\n`;
+  if (mode === "home") {
+    const dir = join(dirs.home, ".neo");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "settings.json"), content, "utf8");
+    return;
+  }
+  await writeFile(join(dirs.work, "settings.json"), content, "utf8");
 }
 
 /** 继承宿主环境但清掉所有测试注入变量，避免宿主 ~/.neo / 端口串味。 */
@@ -157,13 +179,28 @@ export type FakeScenario =
   | "ask-user-multi"
   | "write-then-answer"
   | "allow-session"
+  | "burst"
+  | "image-detect"
+  | "path-escape"
   | "slow"
   | "resume";
+
+export interface FakeImagePart {
+  mime: string;
+  approxBytes: number;
+  urlPrefix: string;
+}
 
 export interface FakeRequestRecord {
   at: number;
   scenario: string;
-  messages: { role: string; content: string; toolCallId?: string; name?: string }[];
+  messages: {
+    role: string;
+    content: string;
+    toolCallId?: string;
+    name?: string;
+    images?: FakeImagePart[];
+  }[];
 }
 
 /** 把子进程流按块解成文本喂回调（流关闭即返回，不抛）。 */
@@ -417,6 +454,10 @@ export interface CoreStartOptions {
   cwd?: string;
   /** 覆盖被测入口（默认 src/main.ts）；仅供 harness 自检使用。 */
   entry?: string;
+  /** settings.json 放置位置：cwd（默认）/ home（~/.neo/settings.json 回落）/ none。 */
+  settingsMode?: SettingsMode;
+  /** settings.json 里的 provider 名（用于证明配置来自哪个文件）。 */
+  settingsProviderName?: string;
   timeoutMs?: number;
 }
 
@@ -449,7 +490,10 @@ export function coreSpawnEnv(opts: CoreStartOptions): Record<string, string> {
 export async function runCoreToExit(
   opts: CoreStartOptions & { timeoutMs?: number },
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  await writeSettings(opts.dirs, opts.fake.baseUrl);
+  await writeSettings(opts.dirs, opts.fake.baseUrl, {
+    mode: opts.settingsMode,
+    providerName: opts.settingsProviderName,
+  });
   const proc = Bun.spawn({
     cmd: [process.execPath, ...coreSpawnArgs(opts)],
     cwd: opts.cwd ?? opts.dirs.work,
@@ -520,7 +564,10 @@ export class StdioCore {
   }
 
   static async start(opts: CoreStartOptions): Promise<StdioCore> {
-    await writeSettings(opts.dirs, opts.fake.baseUrl);
+    await writeSettings(opts.dirs, opts.fake.baseUrl, {
+      mode: opts.settingsMode,
+      providerName: opts.settingsProviderName,
+    });
     const proc = Bun.spawn({
       cmd: [process.execPath, ...coreSpawnArgs(opts)],
       cwd: opts.cwd ?? opts.dirs.work,
@@ -1072,7 +1119,10 @@ export interface WsCore {
 
 /** 起 WS 模式 core（`serve --port 0`），等 core.json 落盘后返回发现信息。 */
 export async function startWsCore(opts: CoreStartOptions): Promise<WsCore> {
-  await writeSettings(opts.dirs, opts.fake.baseUrl);
+  await writeSettings(opts.dirs, opts.fake.baseUrl, {
+    mode: opts.settingsMode,
+    providerName: opts.settingsProviderName,
+  });
   const cwd = opts.cwd ?? opts.dirs.work;
   const cmd = [
     process.execPath,
@@ -1157,15 +1207,133 @@ export async function startWsCore(opts: CoreStartOptions): Promise<WsCore> {
 }
 
 /* ------------------------------------------------------------------ */
+/* Hub（多会话）运行器                                                  */
+/* ------------------------------------------------------------------ */
+
+export interface HubCore {
+  readonly dirs: TestDirs;
+  readonly fake: FakeLlm;
+  readonly runInfo: WsRunInfo;
+  readonly coreJsonPath: string;
+  readonly url: string;
+  readToken(): Promise<string>;
+  stderr(): string;
+  /** GET /health（hub 形态：{ok,mode:"hub",sessions:n}） */
+  health(): Promise<Record<string, any>>;
+  waitExit(timeoutMs?: number): Promise<number>;
+  stop(): Promise<number>;
+}
+
+/** 起 WS 模式 Hub（`serve` 的 hub 子命令）：NEO_RUN_DIR 下等 core.json 拿 url/token。 */
+export async function startHub(opts: CoreStartOptions): Promise<HubCore> {
+  await writeSettings(opts.dirs, opts.fake.baseUrl, {
+    mode: opts.settingsMode,
+    providerName: opts.settingsProviderName,
+  });
+  const cwd = opts.cwd ?? opts.dirs.work;
+  const cmd = [
+    process.execPath,
+    "run",
+    opts.entry ?? MAIN_ENTRY,
+    "hub",
+    "--port",
+    "0",
+    "--dev-auth",
+    "--cwd",
+    cwd,
+    ...(opts.args ?? []),
+  ];
+  const proc = Bun.spawn({
+    cmd,
+    cwd,
+    env: coreSpawnEnv(opts),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  let stderr = "";
+  let stdout = "";
+  const pumps = [
+    pumpText(proc.stderr as ReadableStream<Uint8Array>, (s) => {
+      stderr += s;
+    }),
+    pumpText(proc.stdout as ReadableStream<Uint8Array>, (s) => {
+      stdout += s;
+    }),
+  ];
+  const coreJsonPath = join(opts.dirs.run, "core.json");
+  try {
+    await waitFor(() => existsSync(coreJsonPath), {
+      timeoutMs: opts.timeoutMs ?? 20000,
+      intervalMs: 25,
+      label: "core.json（Hub 启动发现文件）",
+    });
+  } catch (e) {
+    try {
+      proc.kill("SIGKILL");
+    } catch {
+      /* ignore */
+    }
+    throw new Error(`${String(e)}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+  const runInfo = JSON.parse(await readFile(coreJsonPath, "utf8")) as WsRunInfo;
+
+  const waitExit = async (timeoutMs = 10000): Promise<number> => {
+    const code = await Promise.race([proc.exited, sleep(timeoutMs).then(() => null)]);
+    if (code === null) {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        /* ignore */
+      }
+      await Promise.race([proc.exited, sleep(2000)]);
+    }
+    return code ?? -1;
+  };
+
+  return {
+    dirs: opts.dirs,
+    fake: opts.fake,
+    runInfo,
+    coreJsonPath,
+    url: runInfo.url,
+    async readToken() {
+      return (await readFile(runInfo.tokenFile, "utf8")).trim();
+    },
+    stderr: () => stderr,
+    async health() {
+      const res = await fetch(runInfo.url.replace(/^ws:\/\//, "http://").replace(/\/ws$/, "/health"));
+      return (await res.json()) as Record<string, any>;
+    },
+    waitExit,
+    async stop() {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+      const code = await waitExit();
+      await Promise.race([Promise.allSettled(pumps), sleep(1000)]);
+      return code;
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /* 场景包装：dirs + fake LLM + core 生命周期                            */
 /* ------------------------------------------------------------------ */
 
 export interface TestEnvOptions {
   scenario?: FakeScenario;
+  /** fake LLM 的额外环境变量（如 BURST_FRAMES=200）。 */
+  fakeEnv?: Record<string, string>;
   /** core 额外参数（如 --resume） */
   args?: string[];
   /** core 额外 env（如 MATRIX_CORE_APPROVAL_TIMEOUT_MS） */
   env?: Record<string, string>;
+  /** settings.json 放置位置（cwd/home/none）与 provider 名（回落测试用）。 */
+  settingsMode?: SettingsMode;
+  settingsProviderName?: string;
 }
 
 export class TestEnv {
@@ -1183,7 +1351,7 @@ export class TestEnv {
 
   static async create(name: string, options: TestEnvOptions = {}): Promise<TestEnv> {
     const dirs = await makeDirs(name);
-    const fake = await startFakeLlm(options.scenario ?? "tool-then-answer");
+    const fake = await startFakeLlm(options.scenario ?? "tool-then-answer", options.fakeEnv ?? {});
     return new TestEnv(dirs, fake, options);
   }
 
@@ -1195,6 +1363,8 @@ export class TestEnv {
       fake: this.fake,
       args: overrides.args ?? this.options.args,
       env: { ...(this.options.env ?? {}), ...(overrides.env ?? {}) },
+      settingsMode: this.options.settingsMode,
+      settingsProviderName: this.options.settingsProviderName,
       timeoutMs: overrides.timeoutMs,
     });
     this.core = core;
@@ -1318,6 +1488,41 @@ export async function findTranscript(dirs: TestDirs, sessionId: string): Promise
     }
   }
   return hits[0] ?? null;
+}
+
+/** 1×1 透明 PNG 的 base64（不含 data: 前缀）——附件用例的最小合法载荷。 */
+export const TINY_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+/** 1×1 PNG 的 data URL（客户端/测试做 dataBase64 ↔ data URL 换算用）。 */
+export function pngDataUrl(base64: string = TINY_PNG_BASE64): string {
+  return `data:image/png;base64,${base64}`;
+}
+
+/** 递归收集会话附件目录下的文件（路径布局由 core 决定，测试按实际落盘取证）。 */
+export async function findAttachmentFiles(dirs: TestDirs, sessionId?: string): Promise<string[]> {
+  const hits: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        // 只进 attachments 目录，避免把 sessions 里几百个 json 全走一遍。
+        if (entry.name === "attachments" || dir.endsWith("attachments") || (sessionId && entry.name === sessionId)) {
+          await walk(full);
+        }
+      } else if (entry.isFile() && /attachment|img-|\.png$|\.jpg$|\.webp$/.test(entry.name)) {
+        hits.push(full);
+      }
+    }
+  };
+  await walk(dirs.sessions);
+  return hits;
 }
 
 /** 读 transcript 全部行（不解析的坏行原样保留在 raw 里）。 */

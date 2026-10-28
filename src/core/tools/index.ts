@@ -18,6 +18,7 @@ import { toolTmpDir } from "../runtimeTmp.ts";
 import { shellMarks } from "./shellMarks.ts";
 import { listSearchFiles } from "./fileList.ts";
 import { getShell, prepareShellInvocation, shellErrorHint } from "../shell.ts";
+import { PathDeniedError, pathPolicyFor } from "../path.ts";
 
 // 基础类型与注册表在 ./types.ts（叶子模块，解开 task → agent → tools 循环依赖）。
 // 这里 re-export 保持既有导入路径不变。
@@ -28,14 +29,39 @@ export type { ToolCtx, ToolImpl, ToolKind, DispatchResult } from "./types.ts";
 /* 路径处理                                                            */
 /* ------------------------------------------------------------------ */
 
-function abs(ctx: ToolCtx, p: string): string {
+/**
+ * 把 PathPolicy 的拒绝翻成对模型友好的 ToolError。
+ *
+ * - missing（文件/父目录不存在）保留原始文案（模型看得懂，也方便改路径重试）；
+ * - outside/symlink/invalid 统一加「拒绝访问」前缀（工具层负样本断言该前缀）。
+ */
+function toToolPathError(e: PathDeniedError): ToolError {
+  if (e.kind === "missing") return new ToolError(e.message);
+  return new ToolError(`拒绝访问：${e.message}`);
+}
+
+/** 读路径：存在性 + realpath + 必须位于 cwd（或显式豁免的用户级目录）内。 */
+function absRead(ctx: ToolCtx, p: string): string {
   if (!p || typeof p !== "string") throw new ToolError("缺少 path 参数");
-  return resolve(ctx.cfg.cwd, p);
+  try {
+    return pathPolicyFor(ctx.cfg).resolveRead(p);
+  } catch (e) {
+    if (e instanceof PathDeniedError) throw toToolPathError(e);
+    throw e;
+  }
 }
-function insideCwd(ctx: ToolCtx, p: string): boolean {
-  const r = relative(ctx.cfg.cwd, p);
-  return r === "" || (!r.startsWith("..") && !r.startsWith(sep + ".."));
+
+/** 写路径：目标可不存在，但父目录必须存在且 realpath 在边界内。 */
+function absWrite(ctx: ToolCtx, p: string): string {
+  if (!p || typeof p !== "string") throw new ToolError("缺少 path 参数");
+  try {
+    return pathPolicyFor(ctx.cfg).resolveWrite(p);
+  } catch (e) {
+    if (e instanceof PathDeniedError) throw toToolPathError(e);
+    throw e;
+  }
 }
+
 
 function requireFile(p: string): string {
   if (!existsSync(p)) throw new ToolError(`文件不存在: ${p}`);
@@ -122,7 +148,7 @@ const readFile: ToolImpl = {
     },
   },
   execute(args, ctx) {
-    const path = abs(ctx, String(args["path"] ?? ""));
+    const path = absRead(ctx, String(args["path"] ?? ""));
     requireFile(path);
     const offset = Math.max(1, Number(args["offset"] ?? 1) || 1);
     const limit = Math.max(1, Number(args["limit"] ?? 2000) || 2000);
@@ -162,7 +188,7 @@ const writeFileTool: ToolImpl = {
     },
   },
   async execute(args, ctx) {
-    const path = abs(ctx, String(args["path"] ?? ""));
+    const path = absWrite(ctx, String(args["path"] ?? ""));
     assertNotGlobalSkills(ctx, path);
     assertRawImmutable(ctx, path);
     const content = String(args["content"] ?? "");
@@ -209,7 +235,7 @@ const editFile: ToolImpl = {
     },
   },
   async execute(args, ctx) {
-    const path = abs(ctx, String(args["path"] ?? ""));
+    const path = absWrite(ctx, String(args["path"] ?? ""));
     assertNotGlobalSkills(ctx, path);
     assertRawImmutable(ctx, path);
     requireFile(path);
@@ -274,7 +300,7 @@ const listDir: ToolImpl = {
     },
   },
   execute(args, ctx) {
-    const path = abs(ctx, String(args["path"] ?? "."));
+    const path = absRead(ctx, String(args["path"] ?? "."));
     requireDir(path);
     const recursive = args["recursive"] === true;
     const limit = Math.max(1, Number(args["limit"] ?? 300) || 300);
@@ -350,7 +376,7 @@ const globTool: ToolImpl = {
   },
   async execute(args, ctx) {
     const pattern = String(args["pattern"] ?? "");
-    const root = abs(ctx, String(args["path"] ?? "."));
+    const root = absRead(ctx, String(args["path"] ?? "."));
     requireDir(root);
     const limit = Math.max(1, Number(args["limit"] ?? 200) || 200);
 
@@ -462,7 +488,7 @@ const grepTool: ToolImpl = {
   },
   async execute(args, ctx) {
     const pattern = String(args["pattern"] ?? "");
-    const root = abs(ctx, String(args["path"] ?? "."));
+    const root = absRead(ctx, String(args["path"] ?? "."));
     const globPat = args["glob"] ? String(args["glob"]) : null;
     const globRe = globPat ? globToRegExp(globPat) : null;
     const ignoreCase = args["ignore_case"] === true;
@@ -996,4 +1022,4 @@ export function limitOutput(s: string, limit: number, ctx: ToolCtx): DispatchRes
   return { ok: true, output: `${head}\n\n${notice}\n\n${tail}`, truncated: true };
 }
 
-export { shortArgs, abs as resolvePath, insideCwd };
+export { shortArgs };

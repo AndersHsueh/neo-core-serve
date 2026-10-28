@@ -1,6 +1,6 @@
 # Matrix-Core 协议 v1.1
 
-> 状态：**已冻结（C0，2026-10-28）** · v1.1 · 变更流程见 `protocol-freeze.md`
+> 状态：**v1.2（v0.0.2，2026-10-28）** · 增量：附件图片 / transcript.fetch / too_large / 帧 8MB / Hub sessions；v1.1 语义不变。变更流程见 `protocol-freeze.md`
 > 唯一事实源：本文件 + `src/protocol/{types,guards,fixtures,reducer}.ts`。代码与本文冲突时，先改本文再改代码。
 > 基线：`neo-agent-app/gui/src/protocol`（v1 原型）。**v1 的判别名一律不动**；本版只做加法（新增可选字段/事件/命令）与语义收紧。
 > 目标：GUI 改动可控、CLI 将来能纯客户端化；协议可被 fixtures 双向验证。
@@ -17,7 +17,9 @@
   - 对**不认识的事件类型**：放行并忽略（capability 降级），不得因未知事件断连；
   - 对不认识的**命令**：返回 `protocol` 错误。
 - 破坏性变更 → `v: 2`（重命名/删字段/改语义）。
-- `ready.capabilities` 示例（core 实际只 advertise 已实现子集；v0.0.1 = `turn.aborted/command.structured/mode.set/snapshot.live/activity/question.multi`）：
+- `ready.capabilities`（core 实际 advertise 已实现子集）：
+  - v0.0.2 单会话：`turn.aborted/command.structured/mode.set/snapshot.live/activity/question.multi/transcript.replay/attachments.image`；
+  - Hub：以上 + `sessions`。
   `["approval.diff.optional","question.multi","turn.aborted","command.structured","snapshot.live","transcript.replay","mode.set","peers","usage.extended","activity"]`
 
 ---
@@ -32,7 +34,7 @@
 - **Origin 白名单**：`http://127.0.0.1:*`、`http://localhost:*`、`tauri://localhost`；无 Origin（CLI/脚本）允许但需 token。
 - **stdio**：`matrix-core serve --stdio`；一行一 JSON 帧；stdout 只出帧、日志走 stderr；stdin 关闭 = 优雅关闭；仅本机测试。
 - **health**：`GET /health` → `{ok, coreVersion, protocolVersion, state, uptimeMs}`（无鉴权、无 sessionId、无敏感信息）。
-- 单帧 ≤ 1MB；大输出用 `outputRef`（§5.1），附件延后（§11）。
+- 单帧 ≤ **8MB**（v0.0.2 为图片附件放宽；普通文本仍建议 <1MB）；大输出用 `outputRef`。
 
 ---
 
@@ -58,7 +60,7 @@ type ServerMessage =
 - `ready.user` 必填且含 `id/email/displayName/role`；本地模式 `{id:"local",email:"local@localhost",displayName:"Local",role:"owner"}`。
 - **seq**：session 级单调计数，由 **core 分配**（不是 serve），**只随 durable 事件递增并持久化**；ephemeral 事件不消耗计数器，携带**当前 durable seq**（信封里仍有 seq，值可重复）。`server.seq` / `snapshot.seq` 一律指**最高 durable seq**。
 - **epoch**：session 打开时生成的随机串（16 hex），写入该 session 的 transcript 头；`ready/snapshot` 都带。
-  - `session.attach{lastSeq, epoch?}`：epoch 不匹配或 `lastSeq > server.seq（最高 durable seq）` → **强制快照**；否则按 transcript 补齐 durable 事件。
+  - `session.attach{lastSeq, epoch?}`：v0.0.2 一律返回**完整快照**（不补齐）；增量历史用 `transcript.fetch`。
   - 崩溃重启：seq 从最后一个 durable 事件继续；epoch 不变（同一 transcript）；transcript 丢失/重建 → 新 epoch。
 - 客户端必须：每次收到帧都更新 `lastSeq` 与 `epoch`（GUI 现状未更新，属客户端 bug，见 §7）。
 - `sessions/settings/usage` 三种 kind 只用于服务端主动推送；查询结果放 `result.data`。
@@ -79,7 +81,7 @@ type ServerMessage =
 | `session.detach` | `sessionId?` | `{}` | ✅ no-op |
 | `session.rename` | `sessionId?`, `title` | `{}` | ✅ 广播 `session.meta` |
 | `session.close` | `sessionId?` | `{}` | ⚠️ `unsupported`（GUI 提示） |
-| `turn.send` | `sessionId?`, `text`, `clientId`, `refs?` | `{turnId}` | ✅ 运行中 → `conflict` |
+| `turn.send` | `sessionId?`, `text`, `clientId`, `refs?`, `attachments?` | `{turnId}` | ✅ 运行中 → `conflict`；attachments 见 §4.3 |
 | `turn.abort` | `sessionId?`, `turnId?` | `{aborted}` | ✅ 过期 turnId → 幂等 no-op |
 | `approval.resolve` | `sessionId?`, `blockId`, `decision` | `{resolved}` | ✅ |
 | `question.answer` | `sessionId?`, `blockId`, `key?`, `keys?`, `custom?` | `{answered}` | ✅ 兼容 `key` |
@@ -89,7 +91,7 @@ type ServerMessage =
 | `settings.patch` | `patch: SettingsPatch` | `{settings}` | ⚠️ `unsupported`，C3 |
 | `mode.set` | `sessionId?`, `mode` | `{}` | ✅ 广播 `session.meta` |
 | `usage.summary` | `range`, `sessionId?` | `{range, records, totals}` | ✅ 空用量（costMicros=0） |
-| `transcript.fetch` | `sessionId?`, `fromSeq?`, `limit?` | `{events, nextSeq?}` | ❌ v1.2（CLI `/last`） |
+| `transcript.fetch` | `sessionId?`, `fromSeq?`, `limit?` | `{events:[{seq,event}], nextSeq?}` | ✅ v0.0.2（**含 fromSeq**；limit 默认 200 上限 1000） |
 | `checkpoint.list` / `checkpoint.undo` | `sessionId?`, `n?` | `{entries}` / `{restored}` | ❌ v1.2 |
 | `session.export` | `sessionId?`, `format:"md"\|"json"` | `{path, content?}` | ❌ v1.2 |
 | `output.get` | `ref` | `{text, truncated}` | ❌ v1.2 |
@@ -97,7 +99,7 @@ type ServerMessage =
 
 - 所有会话类命令的 `sessionId` 均为可选（v0 校验后忽略），**兼容 GUI 现有调用**。
 - `refs`：`{icon,label,kind?:"file"|"skill"|"url",path?}`；内容由 core 在 `cwd` 内解析；错误/截断在 v1.2 补。
-- `turn.send` 不接收附件（v1.2）。
+- `turn.send` 附件字段见 §4.3（v0.0.2）。
 
 ### 4.2 幂等与冲突
 
@@ -106,7 +108,21 @@ type ServerMessage =
 - `session.attach`：幂等；重复 attach 重发快照或补齐。
 - 客户端负责排队：`turn.send` 在 working 时返回 `conflict`；客户端不得并发发送（GUI 在 busy 时禁用输入）。
 
-### 4.3 设置与模式
+### 4.3 图片附件（v0.0.2）
+
+```ts
+type ImageAttachmentInput = {
+  kind: "image";
+  mime: "image/png" | "image/jpeg" | "image/webp";
+  dataBase64: string;      // 不含 data: 前缀
+};
+```
+
+- `turn.send.attachments?: ImageAttachmentInput[]`；≤5 张、单张解码后 ≤5MB、mime 三选一。
+- core 落盘 `sessions/attachments/<sessionId>/img-N.<ext>`，用户消息 content 加 `image_url`，会话 JSON 写 `$ref`（resume hydrate）。
+- 超限：`too_large`；非法 mime/结构：`protocol`；帧 >8MB：连接层 `too_large`。
+
+### 4.4 设置与模式
 
 - `SettingsView` 沿用 GUI 类型（provider 掩码、routes、memory/env/team、retry、shell…）；由 core 的 `Config` 映射。
 - `SettingsPatch`：浅合并 + 嵌套部分合并；**不接受任何密钥字段**。
@@ -233,7 +249,7 @@ SessionSnapshot = {
 }
 ```
 
-- `attach{lastSeq?,epoch?}`：
+- `attach{lastSeq?,epoch?}`（v0.0.2 仍返回**完整快照**；历史回放用 `transcript.fetch`）：
   - 无 lastSeq / epoch 不符 / lastSeq > server.seq → 完整快照。
   - 有 lastSeq 且可补齐 → 回放 `seq > lastSeq` 的 durable 事件；再发 `live`。
   - 无法补齐（transcript 被清理）→ 快照。
@@ -272,7 +288,7 @@ SessionSnapshot = {
 
 ## 8. 错误码与关闭码
 
-`unauthorized` · `forbidden` · `not_found` · `conflict` · `rate_limited` · `timeout` · `approval_expired` · `question_expired` · `session_gone` · `slow_consumer` · `unsupported` · `protocol` · `internal`
+`unauthorized` · `forbidden` · `not_found` · `conflict` · `rate_limited` · `timeout` · `approval_expired` · `question_expired` · `session_gone` · `slow_consumer` · `unsupported` · `too_large` · `protocol` · `internal`
 
 - 非 pending 的审批/提问（超时/已答/未知）统一 `approval_expired` / `question_expired`；`not_found` 只用于不存在的资源（session/ref）。
 - WS 关闭：4400 协议、4401 未授权、4408 慢消费者、1011 内部错误。
@@ -282,7 +298,7 @@ SessionSnapshot = {
 ## 9. 流控与背压
 
 - delta 合批：16ms 或 4KB；同 block 合并，保留当前 durable seq（不推进、不跳号）。
-- 每连接队列 512 帧 / 8MB；超限先丢 ephemeral，仍超限断开 4408。
+- 每连接队列 512 帧 / 8MB；16ms 或 4KB 或 64 帧 flush；同 block delta 合并；超限先丢 ephemeral，仍超限断开 4408。
 - 客户端重连退避 300ms × 2^n，封顶 5s + jitter。
 
 ---
@@ -299,7 +315,7 @@ SessionSnapshot = {
 ## 11. 延后与未定
 
 - 附件/图片（v1.2）：`turn.send.attachments` + 上传通道 + 提高帧上限。
-- `transcript.fetch` / `output.get` / `checkpoint.*` / `session.export` / `peers.list` / `command.cancel`（v1.2，CLI 纯客户端化前必备）。
+- `output.get` / `checkpoint.*` / `session.export` / `peers.list` / `command.cancel`（v0.0.3+）。
 - `routing.decision`（`/auto` `/why`）、`goal`/`inbox` 元信息（v1.2）。
 - 多客户端租约/审批归属（v0.5 后）。
 - 远程 TLS/鉴权（另一项目）。

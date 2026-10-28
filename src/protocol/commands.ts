@@ -31,6 +31,8 @@ export interface CommandCatalogEntry {
   args: CommandArgSpec[];
   /** 一句话说明（中英由客户端 i18n 负责翻译前的中文口径） */
   description: string;
+  /** 该命令是否会改变会话状态（v1.2；客户端可在轮次运行中提前禁用） */
+  mutates?: boolean;
   /** 协议版本：v1.1 起 */
   since?: string;
   /** false = 客户端专属（不进 core 目录） */

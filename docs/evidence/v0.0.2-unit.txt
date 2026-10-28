@@ -1,0 +1,62 @@
+---- unit ----
+bun test v1.3.13 (bf2e2cec)
+
+tests/unit/protocol.test.ts:
+(pass) 信封与事件 fixtures > 每条信封 fixture 都能被 decodeServerMessage 接受 [0.36ms]
+(pass) 信封与事件 fixtures > 坏样本必须被拒绝 [0.09ms]
+(pass) 信封与事件 fixtures > 未知事件类型放行（客户端能力降级，不得断连） [0.02ms]
+(pass) 信封与事件 fixtures > snapshot 缺 epoch 必须拒绝 [0.04ms]
+(pass) 信封与事件 fixtures > 未知命令拒绝；mode.set 接受 [0.11ms]
+(pass) 信封与事件 fixtures > 协议版本与能力位
+(pass) reducer > 同一事件序列 → 同一状态（确定性） [0.37ms]
+(pass) reducer > 视图块覆盖主要类型 [0.15ms]
+(pass) reducer > session.cleared 清空视图但保留 meta [0.08ms]
+(pass) reducer > hydrate 从 snapshot.live 恢复 streaming 指针 [0.07ms]
+
+tests/unit/sequence.test.ts:
+(pass) seq / epoch 不变量 > 所有帧都能被 guards 接受；durable seq 严格 +1，ephemeral 不推进 [96.67ms]
+(pass) seq / epoch 不变量 > assistant.end.text 是权威全文（= delta 累积），reasoning 同规则 [99.65ms]
+(pass) seq / epoch 不变量 > ephemeral 不写 transcript：transcript 里不得出现 */delta 事件 [97.62ms]
+
+tests/unit/path-policy.test.ts:
+(pass) PathPolicy > 正样本：cwd 内相对/绝对/规范化路径都能解析到 realpath [2.30ms]
+(pass) PathPolicy > 负样本：`..` 逃逸与绝对外部路径被拒（read） [1.21ms]
+(pass) PathPolicy > 负样本：symlink 指向 cwd 外 / symlink 目录逃逸被拒（read+write） [0.77ms]
+(pass) PathPolicy > 负样本：write 到不存在的父目录 / `..` 写逃逸被拒 [0.76ms]
+(pass) PathPolicy > 回归：写悬空 symlink（目标不存在）与指向外部的已有 symlink 都必须拒绝 [1.08ms]
+(pass) PathPolicy > resolveRead 对不存在的 cwd 内文件抛错（存在性检查） [0.71ms]
+
+tests/unit/serve-contract.test.ts:
+(pass) 命令子集与错误码 > help/tier/mode/cost/context/compact/clear 被路由；未知命令与不支持命令报错 [55.26ms]
+(pass) 命令子集与错误码 > 审批超时收敛：by=timeout、tool.end=denied、stats 收口、会话回 idle 可继续 [357.13ms]
+(pass) settings.get 掩码与密钥不出 core > apiKeyMask 不含明文；协议帧/stderr/transcript/日志无明文 key [120.59ms]
+
+tests/unit/batcher.test.ts:
+(pass) EventBatcher > 同 block 的连续 delta 合并：一次发送、文本拼接、seq 取最新 [0.95ms]
+(pass) EventBatcher > 不同 block / 非连续同 block 不合并 [0.18ms]
+(pass) EventBatcher > 16ms 定时 flush（不需要显式 flush） [60.36ms]
+(pass) EventBatcher > 4KB 阈值立即 flush；64 帧阈值立即 flush [0.50ms]
+(pass) EventBatcher > close() 冲刷残留队列，并忽略之后的 enqueue [0.10ms]
+(pass) EventBatcher > 超限：先丢 ephemeral；durable 仍超限 → onOverflow（4408 由调用方关闭） [0.42ms]
+(pass) EventBatcher > 8MB 字节上限同样触发丢 ephemeral / overflow [0.15ms]
+
+tests/unit/delta-fastpath.test.ts:
+(pass) delta 快路径一致性 > 长 delta 会话：权威全文/累积/快照三处一致，连续多轮不 flake [1476.80ms]
+(pass) delta 快路径一致性 > 快照 blocks === protocol reducer 重放 transcript 的结果（快路径不分叉） [254.71ms]
+(pass) delta 快路径一致性 > reasoning 快路径：reasoning.end.text 权威、delta 累积一致、快照块文本一致 [97.74ms]
+
+tests/guards/protocol-purity.test.ts:
+(pass) protocol 纯净性 > 只允许内部相对 import [0.46ms]
+(pass) protocol 纯净性 > 禁止非确定性调用与平台 API [0.19ms]
+(pass) protocol 纯净性 > v1.2 语义版本已冻结 [0.05ms]
+
+tests/guards/core-boundary.test.ts:
+(pass) core 边界守卫 > core（不含 ui 兼容层）禁止 process.exit / process.stdout.isTTY / console.log [7.36ms]
+(pass) core 边界守卫 > core/agent.ts 不得再使用 process.stdout.isTTY（流式由 streaming 注入） [0.66ms]
+(pass) core 边界守卫 > core 不得运行时 import serve/（只允许 `import type ... serve/types.ts`） [4.31ms]
+(pass) core 边界守卫 > ui 兼容层存在且被显式豁免（v0.0.2 清理项，防止悄悄扩散） [5.05ms]
+
+ 39 pass
+ 0 fail
+ 379 expect() calls
+Ran 39 tests across 8 files. [2.82s]

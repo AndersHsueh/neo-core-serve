@@ -85,7 +85,7 @@ describe("信封与事件 fixtures", () => {
 
   test("协议版本与能力位", () => {
     expect(PROTOCOL_VERSION).toBe(1);
-    expect(PROTOCOL_SEMVER).toBe("1.1");
+    expect(PROTOCOL_SEMVER).toBe("1.2");
   });
 });
 

@@ -26,7 +26,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { Agent, type AgentEvent, type PermissionMode } from "./agent.ts";
@@ -45,23 +44,33 @@ import {
   type Config,
   type ModelTier,
 } from "./config.ts";
-import { Classifier, CLASSIFIER_NAMES, isClassifierName } from "./classifier/index.ts";
+import { Classifier } from "./classifier/index.ts";
+import {
+  findCommand,
+  isMutatingCommand,
+  unsupportedCommand,
+  type CommandContext,
+  type CommandResult,
+} from "./commands/registry.ts";
 import { createMemoryBridge, type MemoryBridge } from "./memory/bridge.ts";
 import { CheckpointStore } from "./checkpoint.ts";
 import {
   adoptSession,
   applyRestored,
   createSession,
+  decodeImageDataUrl,
   loadSession,
   saveSession,
+  writeImageAttachment,
   type SessionFile,
   type SessionMeta as NeoSessionMeta,
 } from "./session.ts";
+import { pathPolicyFor } from "./path.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { formatResumeWarning, outcomeOf, type LastTurnMeta } from "./turnDiagnostics.ts";
 import { resolveAndApplyModelWindow, recordModelContext } from "./env/modelWindows.ts";
 import { contentText, type Message, type chatStream } from "./llm.ts";
-import { registerTool, toolNames } from "./tools/index.ts";
+import { registerTool } from "./tools/index.ts";
 import { makeTaskTool, runSubagent } from "./tools/task.ts";
 import { registerWikiTools } from "./tools/wiki.ts";
 import { makeRememberTool } from "./tools/memory.ts";
@@ -78,11 +87,18 @@ import * as mailboxState from "./mailbox/state.ts";
 import { decideInbound, formatIncomingFrame } from "./mailbox/inbound.ts";
 import { mailboxRoot } from "./mailbox/types.ts";
 import { ProtocolIO } from "./protocol-io.ts";
+import {
+  lockDir as lockDirPath,
+  sessionPath as sessionPathOf,
+  transcriptPath as transcriptPathOf,
+} from "./paths.ts";
 import { applyEvent, applyEvents } from "../protocol/reducer.ts";
 
 import type {
-  CommandChanges,
+  AssistantDeltaEvent,
   ContextState,
+  ImageAttachmentInput,
+  ReasoningDeltaEvent,
   PermissionMode as ProtocolPermissionMode,
   SessionEvent,
   SessionMeta as ProtocolSessionMeta,
@@ -94,11 +110,25 @@ import type {
   TranscriptBlock,
   Usage,
   UsageRecord,
-  ViewBlock,
 } from "../protocol/types.ts";
 import type { CommandOutcome, HostEvent, HostPort, SendRef } from "../serve/types.ts";
 
 const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
+/** 附件限制（协议 §2.5）：≤5 张、单张解码后 ≤5MB、仅 png/jpeg/webp。 */
+const MAX_ATTACHMENTS = 5;
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+const ALLOWED_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp"]);
+/** @ref 内联：单文件 / 总字节 / 数量上限（避免一次引用把上下文/transcript 撑爆）。 */
+const REF_MAX_CHARS = 200_000;
+const REF_TOTAL_BYTES = 200_000;
+const REF_MAX_COUNT = 5;
+/** 所有附件 base64 之和上限（= 帧上限 8MB）。 */
+const MAX_ATTACHMENTS_TOTAL_BASE64 = 8 * 1024 * 1024;
+/** 与 protocol/reducer.ts 的 MAX_STREAM_TEXT 对齐（超长流式文本截断，防内存爆炸）。 */
+const MAX_STREAM_TEXT = 2_000_000;
+/** transcript.fetch 默认/最大条数。 */
+const TRANSCRIPT_FETCH_DEFAULT = 200;
+const TRANSCRIPT_FETCH_MAX = 1000;
 const DEFAULT_QUESTION_TIMEOUT_MS = 300_000;
 /** transcript 里的 durable 事件行：{seq, event}。 */
 interface TranscriptEntry {
@@ -160,23 +190,6 @@ export async function createSessionHost(opts: CreateSessionHostOptions = {}): Pr
 function envOf(name: string): string | undefined {
   const v = process.env[name];
   return v && v.trim() !== "" ? v : undefined;
-}
-
-function sessionsRoot(): string {
-  return envOf("NEO_SESSIONS_DIR") ?? join(homedir(), ".neo", "sessions");
-}
-
-function transcriptsRoot(): string {
-  return envOf("NEO_TRANSCRIPTS_DIR") ?? join(sessionsRoot(), "transcripts");
-}
-
-/** 会话文件路径**从 id 重算**，绝不信文件里的 meta.path（AGENTS 踩坑）。 */
-function sessionPathOf(id: string): string {
-  return join(sessionsRoot(), `${id}.json`);
-}
-
-function transcriptPathOf(id: string): string {
-  return join(transcriptsRoot(), `${id}.ndjson`);
 }
 
 function isoAt(ms: number): string {
@@ -602,9 +615,14 @@ class SessionHost implements HostPort {
       this.appendTranscript(this._seq, event);
       this.events.push({ seq: this._seq, event });
     }
-    // ephemeral 也要进 reducer：delta 不写 transcript，但快照/live 必须能看见
+    // ephemeral 也要进视图：delta 不写 transcript，但快照/live 必须能看见
     // 进行中轮的 partial 正文（协议 §6.3 的 mid-turn attach 要求）。
-    this.state = applyEvent(this.state, event);
+    if (!durable && (event.type === "assistant.delta" || event.type === "reasoning.delta")) {
+      // 快路径：只改目标 block（delta 是最高频事件，不能让每条都 clone 全 blocks）。
+      this.applyStreamDelta(event);
+    } else {
+      this.state = applyEvent(this.state, event);
+    }
     const envelope = { ...event, seq: this._seq } as HostEvent;
     for (const cb of [...this.listeners]) {
       try {
@@ -638,6 +656,37 @@ class SessionHost implements HostPort {
     } catch {
       // 写失败：首条 durable 事件时会再试
     }
+  }
+
+  /**
+   * per-delta 快路径（架构 v0.0.2 §2.2）：只改当前 block，不 clone 全 blocks/segments。
+   * 语义必须与 protocol/reducer.ts 的 assistant.delta / reasoning.delta 完全一致
+   * （含 MAX_STREAM_TEXT 截断），否则快照与 reducer 重放会分叉。
+   */
+  private applyStreamDelta(event: AssistantDeltaEvent | ReasoningDeltaEvent): void {
+    const blocks = this.state.blocks;
+    let idx = blocks.length - 1;
+    if (idx < 0 || blocks[idx]?.id !== event.blockId) {
+      idx = blocks.findIndex((b) => b.id === event.blockId);
+    }
+    if (idx < 0) return; // block 未出现（异常顺序）：与 reducer 的 no-op 一致
+    const block = blocks[idx];
+    if (!block) return;
+
+    if (event.type === "assistant.delta") {
+      if (block.kind !== "assistant" || event.text === "") return;
+      const last = block.segments[block.segments.length - 1];
+      if (last && last.type === "p") {
+        if (last.text.length + event.text.length > MAX_STREAM_TEXT) return;
+        last.text += event.text;
+      } else {
+        block.segments.push({ type: "p", text: event.text });
+      }
+      return;
+    }
+
+    if (block.kind !== "reasoning" || event.text === "") return;
+    block.text = (block.text + event.text).slice(0, MAX_STREAM_TEXT);
   }
 
   private appendTranscript(seq: number, event: SessionEvent): void {
@@ -739,96 +788,32 @@ class SessionHost implements HostPort {
   }
 
   configView(): SettingsView {
-    const cfg = this.cfg;
-    const resolvedRoutes = MODEL_TIERS.map((tier) => {
-      const route = cfg.routes[tier];
-      const provider = route?.provider ?? cfg.providerName;
-      const p = cfg.providers.find((x) => x.name === provider);
-      const model = route?.model || p?.models[tier] || cfg.model;
-      return {
-        tier: tier as Tier,
-        provider,
-        model,
-        fallbackAllowed: route?.fallbackAllowed ?? true,
-      };
-    });
-    return {
-      defaultProvider: cfg.providerName,
-      defaultTier: cfg.modelTier as Tier,
-      classifierProvider: cfg.classifierProvider,
-      classifierModelName: cfg.classifierModel,
-      providers: cfg.providers.map((p) => ({
-        providerName: p.name,
-        providerType: p.type,
-        baseUrl: p.baseUrl,
-        apiKeyMask: maskKey(p.apiKey),
-        defaultModelName: p.models.default,
-        deepReasoningModelName: p.models.deep_reasoning,
-        balancedModelName: p.models.balanced,
-        fastModelName: p.models.fast,
-        maxTokens: p.maxTokens ?? cfg.globalDefaults.maxTokens,
-        temperature: p.temperature ?? cfg.globalDefaults.temperature,
-        contextWindow: p.contextWindow ?? cfg.globalDefaults.contextWindow,
-        isDefault: p.name === cfg.providerName,
-      })),
-      routes: resolvedRoutes,
-      compactThreshold: cfg.compactThreshold,
-      maxToolIterations: cfg.maxToolIterations,
-      toolOutputLimit: cfg.toolOutputLimit,
-      shell: {
-        path: cfg.shell?.path ?? null,
-        login: cfg.shell?.login ?? true,
-        args: cfg.shell?.args ?? null,
-      },
-      retry: {
-        maxAttempts: cfg.retry?.maxAttempts ?? 3,
-        connectTimeoutMs: cfg.retry?.connectTimeoutMs ?? 30_000,
-        streamIdleTimeoutMs: cfg.retry?.streamIdleTimeoutMs ?? 120_000,
-      },
-      showReasoning: cfg.showReasoning,
-      toolcallInfoDetails: cfg.toolcallInfoDetails,
-      memory: {
-        enabled: cfg.memory.enabled,
-        autoRecall: cfg.memory.autoRecall.enabled,
-        autoCapture: cfg.memory.autoCapture.enabled,
-        journalRetentionDays: cfg.memory.autoCapture.journalRetentionDays,
-        userWikiDir: cfg.memory.userWikiDir,
-      },
-      env: {
-        enabled: cfg.env?.enabled !== false,
-        probeTtlHours: cfg.env?.probeTtlHours ?? 12,
-        prompt: cfg.env?.prompt !== false,
-        wikiPage: cfg.env?.wikiPage !== false,
-      },
-      team: {
-        skillsExtraPaths: cfg.skillsExtraPaths ?? [],
-        // SettingsView 只暴露 auto|hold|off：accept→auto（按接收方权限档），refuse→off。
-        crossSessionInbound:
-          cfg.crossSessionInbound === "accept"
-            ? "auto"
-            : cfg.crossSessionInbound === "refuse"
-              ? "off"
-              : cfg.crossSessionInbound,
-        crossSessionAutoTurnLimit: cfg.mailbox.autoTurnLimit,
-        crossSessionHeartbeatMs: cfg.mailbox.heartbeatMs,
-        crossSessionDeadAfterMs: cfg.mailbox.deadAfterMs,
-        crossSessionProgressTimeoutMs: cfg.mailbox.progressTimeoutMs,
-        crossSessionWatchdogIntervalS: cfg.mailbox.watchdogIntervalS,
-      },
-    };
+    return buildSettingsView(this.cfg);
   }
 
   /* ------------------------------------------------------------------ */
   /* 轮次                                                                */
   /* ------------------------------------------------------------------ */
 
-  async send(text: string, refs: SendRef[] | undefined, clientId: string): Promise<{ turnId: string }> {
+  async send(
+    text: string,
+    refs: SendRef[] | undefined,
+    clientId: string,
+    attachments?: ImageAttachmentInput[],
+  ): Promise<{ turnId: string }> {
     if (this.closed) throw hostError("session_gone", "会话已关闭");
     // 幂等：同一 clientId 的重投递返回同一 turnId（含「本轮仍在跑」的窗口）。
     const seen = clientId ? this.recentClientIds.get(clientId) : undefined;
     if (seen) return { turnId: seen };
     if (this.turn) throw hostError("conflict", "本轮仍在运行；请等 stats/turn.aborted 后再发送");
     if (!text || text.trim() === "") throw hostError("protocol", "text 不能为空");
+
+    // v0.0.2：附件先校验/落盘，失败在开轮前就返回明确错误码（不留下半轮）。
+    const images = this.prepareAttachments(attachments);
+    // @refs：把引用文件内容内联进用户消息（读路径走 PathPolicy）。
+    // 注意：内联正文只进 messages（LLM 上下文），turn.start.userText 仍是原始文本，
+    // 否则 transcript 里会重复存一份大段文件内容（simplify：durable 不重复）。
+    const userText = this.composeUserText(text, refs);
 
     const turnId = this.newId("turn");
     const blockId = this.newId("turnblk");
@@ -867,7 +852,7 @@ class SessionHost implements HostPort {
       true,
     );
 
-    const done = this.runTurn(turnId, text).catch((e) => {
+    const done = this.runTurn(turnId, images.length > 0 ? { text: userText, images } : userText).catch((e) => {
       // runTurn 内部已尽量收口；这里只兜底，绝不让 Promise 变成 unhandled。
       this.emit(
         {
@@ -885,12 +870,148 @@ class SessionHost implements HostPort {
     return { turnId };
   }
 
-  private async runTurn(turnId: string, text: string): Promise<void> {
+  /* ------------------------------------------------------------------ */
+  /* 附件与 @refs（v0.0.2）                                              */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 校验并落盘图片附件，返回给 Agent 的 data URL 列表。
+   *
+   * 规则（simplify 收口）：
+   *  - ≤5 张；单张解码 ≤5MB（too_large）；所有 base64 之和 ≤8MB（帧上限，too_large）；
+   *  - base64 必须**严格**：只允许 `[A-Za-z0-9+/=]`、长度 %4==0、可往返编码；
+   *  - magic bytes 必须与声明 mime 一致（PNG/JPEG/WebP），否则 protocol；
+   *  - 落盘用内容哈希命名（多轮不撞名），返回 data URL 给 Agent。
+   */
+  private prepareAttachments(attachments?: ImageAttachmentInput[]): string[] {
+    if (!attachments || attachments.length === 0) return [];
+    if (attachments.length > MAX_ATTACHMENTS) {
+      throw hostError("too_large", `附件最多 ${MAX_ATTACHMENTS} 张，收到 ${attachments.length} 张`);
+    }
+    if (attachments.length > 0) this.assertBase64Budget(attachments);
+    const out: string[] = [];
+    for (const [i, att] of attachments.entries()) {
+      const no = i + 1;
+      if (!att || att.kind !== "image") {
+        throw hostError("protocol", `附件 #${no} 不是 image（kind=${String(att?.kind)}）`);
+      }
+      if (!ALLOWED_IMAGE_MIMES.has(att.mime)) {
+        throw hostError("protocol", `附件 #${no} 的 mime "${att.mime}" 不支持（只接受 png/jpeg/webp）`);
+      }
+      const b64 = strictBase64(att.dataBase64, no);
+      const bytes = Buffer.from(b64, "base64");
+      if (bytes.length > MAX_ATTACHMENT_BYTES) {
+        throw hostError(
+          "too_large",
+          `附件 #${no} 解码后 ${(bytes.length / 1024 / 1024).toFixed(2)}MB，超过单张 5MB 上限`,
+        );
+      }
+      const sniffed = sniffImageMime(bytes);
+      if (sniffed !== att.mime) {
+        throw hostError(
+          "protocol",
+          `附件 #${no} 的内容不是 ${att.mime}（magic=${sniffed ?? "unknown"}）`,
+        );
+      }
+      const dataUrl = `data:${att.mime};base64,${b64}`;
+      const file = decodeImageDataUrl(dataUrl);
+      if (!file) throw hostError("protocol", `附件 #${no} 不是合法的图片 data URL`);
+      // 立即落盘：即使本轮失败，附件也不会悬空在内存里。
+      writeImageAttachment(this.sessionId, file);
+      out.push(dataUrl);
+    }
+    return out;
+  }
+
+  /** 所有附件 base64 之和 ≤8MB（WS/stdio 帧上限）。 */
+  private assertBase64Budget(attachments: ImageAttachmentInput[]): void {
+    let total = 0;
+    for (const [i, att] of attachments.entries()) {
+      if (!att || typeof att.dataBase64 !== "string") continue;
+      const b64 = att.dataBase64.replace(/\s+/g, "");
+      total += b64.length;
+      if (total > MAX_ATTACHMENTS_TOTAL_BASE64) {
+        throw hostError(
+          "too_large",
+          `附件总 base64 超过 ${Math.round(MAX_ATTACHMENTS_TOTAL_BASE64 / 1024 / 1024)}MB 上限（第 ${i + 1} 张时越界）`,
+        );
+      }
+    }
+  }
+
+  /**
+   * 把 @refs 引用的文件内容内联到用户文本。
+   *
+   * 限额（simplify）：最多内联 `REF_MAX_COUNT` 个带 path 的 ref、总字节 ≤ `REF_TOTAL_BYTES`。
+   * 超出的 ref 只留占位说明 + notice，不阻塞本轮。读路径走 PathPolicy。
+   */
+  private composeUserText(text: string, refs?: SendRef[]): string {
+    if (!refs || refs.length === 0) return text;
+    const policy = pathPolicyFor(this.cfg);
+    const blocks: string[] = [];
+    let inlined = 0;
+    let budget = REF_TOTAL_BYTES;
+    for (const ref of refs) {
+      if (!ref?.path) continue; // 只有 label 的 ref（如 url/skill）不内联
+      const label = ref.label ?? ref.path;
+      if (inlined >= REF_MAX_COUNT) {
+        blocks.push(`### ${label}（${ref.path}）\n\n（引用数量超过 ${REF_MAX_COUNT} 个上限，未内联）`);
+        continue;
+      }
+      if (budget <= 0) {
+        blocks.push(`### ${label}（${ref.path}）\n\n（引用总量超过 ${REF_TOTAL_BYTES} 字节上限，未内联）`);
+        continue;
+      }
+      try {
+        const abs = policy.resolveRead(ref.path);
+        const raw = readFileSync(abs, "utf8");
+        const take = Math.min(raw.length, REF_MAX_CHARS, budget);
+        const clipped =
+          take < raw.length
+            ? `${raw.slice(0, take)}\n…[引用内容已截断：共 ${raw.length} 字符]`
+            : raw;
+        budget -= Buffer.byteLength(clipped, "utf8");
+        inlined += 1;
+        blocks.push(`### ${label}（${ref.path}）\n\n\`\`\`\n${clipped}\n\`\`\``);
+      } catch (e) {
+        const reason = (e as Error).message;
+        blocks.push(`### ${label}（${ref.path}）\n\n（无法读取：${reason}）`);
+        this.emit(
+          { type: "notice", level: "warn", text: `引用 ${ref.path} 读取失败：${reason}` },
+          false,
+        );
+      }
+    }
+    if (blocks.length === 0) return text;
+    return `${text}\n\n<referenced-files>\n${blocks.join("\n\n")}\n</referenced-files>`;
+  }
+
+  /** v0.0.2：durable 事件回放（fromSeq 不含；默认从 1 开始、最多 200 条）。 */
+  fetchTranscript(
+    fromSeq?: number,
+    limit?: number,
+  ): { events: Array<{ seq: number; event: SessionEvent }>; nextSeq?: number } {
+    const from = Number.isFinite(fromSeq) ? Math.max(1, Math.floor(fromSeq as number)) : 1;
+    const limRaw = Number.isFinite(limit) ? Math.floor(limit as number) : TRANSCRIPT_FETCH_DEFAULT;
+    const lim = Math.min(Math.max(1, limRaw), TRANSCRIPT_FETCH_MAX);
+    const start = this.events.findIndex((e) => e.seq >= from);
+    if (start < 0) return { events: [] };
+    const slice = this.events
+      .slice(start, start + lim)
+      .map((e) => ({ seq: e.seq, event: e.event }));
+    const next = this.events[start + lim];
+    return next ? { events: slice, nextSeq: next.seq } : { events: slice };
+  }
+
+  private async runTurn(
+    turnId: string,
+    input: string | { text: string; images: string[] },
+  ): Promise<void> {
     const startedAt = this.now();
     let stats: Awaited<ReturnType<Agent["send"]>> | null = null;
     let failure: Error | null = null;
     try {
-      stats = await this.agent.send(text);
+      stats = await this.agent.send(input);
     } catch (e) {
       failure = e as Error;
     }
@@ -1159,15 +1280,14 @@ class SessionHost implements HostPort {
   /* ------------------------------------------------------------------ */
 
   async runCommand(name: string, args: string[]): Promise<CommandOutcome> {
-    const cmd = name.replace(/^\/+/, "").trim();
-    const arg = args[0] ?? "";
-    const outcome = await this.runCommandInner(cmd, arg, args);
+    const cmdName = name.replace(/^\/+/, "").trim().toLowerCase();
+    const outcome = await this.executeCommand(cmdName, args);
     // 结构化回执（v1.1 可选事件）：失败也发，便于客户端命令面板留痕。
     this.emit(
       {
         type: "command.result",
         blockId: this.newId("cmd"),
-        name: cmd,
+        name: cmdName,
         ok: outcome.ok,
         blocks: outcome.blocks,
         ...(outcome.changes ? { changes: outcome.changes } : {}),
@@ -1178,270 +1298,60 @@ class SessionHost implements HostPort {
     return outcome;
   }
 
-  private async runCommandInner(cmd: string, arg: string, args: string[]): Promise<CommandOutcome> {
-    // M2：轮次运行中拒绝会改会话状态的命令（只读命令照常）。
-    // 否则 /clear /mode /tier 会与正在跑的 Agent 抢同一份 messages/cfg。
-    if (this.turn && isMutatingCommand(cmd, args)) {
-      return fail(
-        "conflict",
-        `本轮运行中不能执行 /${cmd}（等 stats/turn.aborted 后再试）`,
-      );
-    }
-    switch (cmd) {
-      case "help":
-      case "?":
-        return ok([
+  /** 单表路由 + 轮中保护（M2）+ 异常收口；结果形状与 serve 的 CommandOutcome 兼容。 */
+  private async executeCommand(cmdName: string, args: string[]): Promise<CommandResult> {
+    const spec = findCommand(cmdName);
+    if (!spec) return unsupportedCommand(cmdName);
+    if (this.turn && isMutatingCommand(cmdName, args)) {
+      return {
+        ok: false,
+        blocks: [
           {
-            kind: "markdown",
-            text: HELP_TEXT,
+            kind: "notice",
+            level: "error",
+            text: `本轮运行中不能执行 /${cmdName}（等 stats/turn.aborted 后再试）`,
           },
-        ]);
-
-      case "clear": {
-        this.agent.reset();
-        this.persistMessages(null, null);
-        this.emit({ type: "session.cleared", at: this.now() }, true);
-        return ok([{ kind: "text", text: "上下文已清空。" }]);
-      }
-
-      case "compact": {
-        const done = await this.agent.compact();
-        if (!done) {
-          return ok([{ kind: "text", text: "对话太短或压缩失败，未做处理。" }]);
-        }
-        const pct = `${(this.agent.contextUsage() * 100).toFixed(1)}%`;
-        return ok([{ kind: "text", text: `压缩完成。上下文使用率 ${pct}` }]);
-      }
-
-      case "context": {
-        let usage = 0;
-        try {
-          usage = this.agent.contextUsage();
-        } catch {
-          usage = 0;
-        }
-        const ctx = this.contextState(usage);
-        const last = this.agent.lastCompactionInfo;
-        const items = [
-          { k: "model", v: `${this.cfg.providerName}/${this.cfg.model}` },
-          { k: "window", v: `${ctx.limit} tokens (${this.cfg.contextWindowSource ?? "config"})` },
-          { k: "threshold", v: `${(this.cfg.compactThreshold * 100).toFixed(0)}% · ${Math.round(this.cfg.compactThreshold * ctx.limit)} tokens` },
-          { k: "estimate", v: `${ctx.used} tokens (${(usage * 100).toFixed(1)}%)` },
-          { k: "messages", v: String(this.agent.messages.length) },
-          { k: "last compact", v: last ? `${last.beforeTokens} → ${last.afterTokens} tokens` : "无" },
-        ];
-        return ok([{ kind: "kv", items }]);
-      }
-
-      case "cost": {
-        const cum = this.agent.cumulative;
-        const items = [
-          { k: "provider", v: `${this.cfg.providerName} (${this.cfg.providerType})` },
-          { k: "tier", v: tierDisplayName(this.cfg.modelTier) },
-          { k: "model", v: this.cfg.model },
-          { k: "endpoint", v: this.cfg.baseUrl },
-          { k: "api key", v: maskKey(this.cfg.apiKey) },
-          { k: "prompt", v: `${cum.prompt} tokens` },
-          { k: "completion", v: `${cum.completion} tokens` },
-          { k: "thinking", v: `${cum.reasoning} tokens` },
-          { k: "cost", v: `$${(this.usageTotals.costMicros / 1_000_000).toFixed(6)}（未计价）` },
-        ];
-        return ok([{ kind: "kv", items }]);
-      }
-
-      case "tier":
-      case "fast":
-      case "balanced":
-      case "deep":
-      case "deep_reasoning":
-      case "default": {
-        const rawTarget = cmd === "tier" ? (args[0] ?? "") : cmd;
-        if (cmd === "tier" && rawTarget === "") {
-          const items = MODEL_TIERS.map((t) => ({
-            k: `${t === this.cfg.modelTier ? "●" : "○"} ${tierChoiceLabel(t)}`,
-            v: describeRoute(this.cfg, t),
-          }));
-          return ok([{ kind: "kv", items }]);
-        }
-        const target = normalizeTierName(rawTarget);
-        if (!target) {
-          return fail("protocol", `未知档位 "${rawTarget}"。可选：${MODEL_TIERS.join(", ")}`);
-        }
-        const from = this.cfg.modelTier as Tier;
-        const r = switchTier(this.cfg, target);
-        if (!r.ok) return fail("conflict", r.error);
-        this.agent.noteModelChange(this.cfg);
-        if (from !== (this.cfg.modelTier as Tier)) {
-          this.emit(
-            {
-              type: "tier.switch",
-              from,
-              to: this.cfg.modelTier as Tier,
-              reason: `命令 /${cmd} 切换`,
-              at: this.now(),
-            },
-            true,
-          );
-        }
-        this.emitMeta();
-        const changes: CommandChanges = {
-          tier: this.cfg.modelTier as Tier,
-          provider: this.cfg.providerName,
-          model: this.cfg.model,
-        };
-        const blocks: ViewBlock[] = [
-          {
-            kind: "text",
-            text:
-              `档位 → ${tierChoiceLabel(this.cfg.modelTier)}` +
-              `（${this.cfg.providerName} / ${this.cfg.model}）`,
-          },
-        ];
-        if (r.degraded && r.note) {
-          blocks.push({ kind: "notice", level: "warn", text: r.note });
-        }
-        return { ok: true, blocks, changes };
-      }
-
-      case "mode": {
-        if (!arg) {
-          const items = [
-            { k: "当前模式", v: this.mode },
-            { k: "1", v: "ask — 写文件/执行命令都需批准" },
-            { k: "2", v: "auto-edit — 自动批准写文件，命令仍需批准" },
-            { k: "3", v: "auto-all — 全部自动批准（慎用）" },
-            { k: "4", v: "plan — 只读，禁止一切写操作" },
-          ];
-          return ok([{ kind: "kv", items }]);
-        }
-        const map: Record<string, ProtocolPermissionMode> = {
-          "1": "ask",
-          ask: "ask",
-          "2": "auto-edit",
-          "auto-edit": "auto-edit",
-          "3": "auto-all",
-          "auto-all": "auto-all",
-          "4": "plan",
-          plan: "plan",
-        };
-        const next = map[arg];
-        if (!next) return fail("protocol", `未知模式 ${arg}`);
-        await this.setMode(next);
-        return { ok: true, blocks: [{ kind: "text", text: `权限模式 → ${next}` }], changes: { mode: next } };
-      }
-
-      case "tools": {
-        const names = toolNames();
-        return ok([
-          { kind: "kv", items: [{ k: "可用工具", v: String(names.length) }] },
-          { kind: "list", items: names },
-        ]);
-      }
-
-      case "history": {
-        const turns = this.agent.messages.filter((m) => m.role === "user");
-        const items = turns.slice(-10).map((m, i) => {
-          const text = contentText(m.content) ?? "";
-          const flat = text.replace(/\s+/g, " ").trim();
-          return `${i + 1}. ${flat.length > 80 ? `${flat.slice(0, 80)}…` : flat}`;
-        });
-        if (items.length === 0) return ok([{ kind: "text", text: "还没有用户消息。" }]);
-        return ok([{ kind: "list", items, ordered: true }]);
-      }
-
-      case "why": {
-        const last = this.classifier.lastResult;
-        const items = [
-          { k: "分类器", v: this.classifier.name },
-          { k: "判定档位", v: last?.tier ?? "（暂无判定）" },
-          { k: "来源", v: last?.source ?? "-" },
-          { k: "理由", v: last?.reason ?? "-" },
-          { k: "当前生效", v: `${this.cfg.modelTier} → ${this.cfg.providerName} / ${this.cfg.model}` },
-        ];
-        const failure = this.classifier.lastFailure;
-        if (failure) items.push({ k: "上次失败", v: failure });
-        return ok([{ kind: "kv", items }]);
-      }
-
-      case "auto": {
-        if (!arg) {
-          const items: { k: string; v: string }[] = [
-            { k: "自动分类", v: this.classifier.name },
-          ];
-          for (const n of CLASSIFIER_NAMES) {
-            items.push({ k: n === this.classifier.name ? `● ${n}` : `○ ${n}`, v: "" });
-          }
-          return ok([{ kind: "kv", items }]);
-        }
-        if (!isClassifierName(arg)) {
-          return fail("protocol", `未知分类器 "${arg}"。可选：${CLASSIFIER_NAMES.join(", ")}`);
-        }
-        try {
-          this.classifier.use(arg, this.cfg);
-        } catch (e) {
-          return fail("internal", (e as Error).message);
-        }
-        return ok([{ kind: "text", text: `自动分类 → ${arg}` }]);
-      }
-
-      case "provider": {
-        if (!arg) {
-          const items = this.cfg.providers.map((p) => ({
-            k: `${p.name === this.cfg.providerName ? "●" : "○"} ${p.name}`,
-            v: `${p.type} → ${p.baseUrl}`,
-          }));
-          return ok([{ kind: "kv", items }]);
-        }
-        const r = switchProvider(this.cfg, arg);
-        if (!r.ok) return fail("conflict", r.error);
-        this.agent.noteModelChange(this.cfg);
-        this.emitMeta();
-        return {
-          ok: true,
-          blocks: [
-            { kind: "text", text: `provider → ${this.cfg.providerName}（${this.cfg.providerType}）` },
-            { kind: "kv", items: [{ k: "model", v: `${this.cfg.model} [${tierDisplayName(this.cfg.modelTier)}]` }] },
-          ],
-          changes: { provider: this.cfg.providerName, model: this.cfg.model },
-        };
-      }
-
-      case "model": {
-        if (!arg) {
-          return ok([
-            {
-              kind: "kv",
-              items: [
-                { k: "当前模型", v: `${this.cfg.model} (${this.cfg.modelTier})` },
-                { k: "provider", v: this.cfg.providerName },
-              ],
-            },
-          ]);
-        }
-        const model = arg.trim();
-        this.cfg.model = model;
-        this.agent.noteModelChange(this.cfg);
-        this.emitMeta();
-        return {
-          ok: true,
-          blocks: [{ kind: "text", text: `模型 → ${model}` }],
-          changes: { model },
-        };
-      }
-
-      case "rename": {
-        const next = args.join(" ").trim();
-        if (!next) return fail("protocol", "用法：/rename <title>");
-        this.rename(next);
-        return { ok: true, blocks: [{ kind: "text", text: `标题 → ${next}` }], changes: { title: next } };
-      }
-
-      default:
-        return fail(
-          "protocol",
-          `不支持的命令 /${cmd}。可用：${COMMAND_SUBSET.join(", ")}`,
-        );
+        ],
+        error: { code: "conflict", message: `本轮运行中不能执行 /${cmdName}` },
+      };
     }
+    try {
+      return await spec.run(this.commandContext(), args);
+    } catch (e) {
+      return {
+        ok: false,
+        blocks: [
+          { kind: "notice", level: "error", text: `/${cmdName} 执行失败：${(e as Error).message}` },
+        ],
+        error: { code: "internal", message: (e as Error).message },
+      };
+    }
+  }
+
+  /** 命令看到的宿主能力面（唯一出口；命令不直接 import session-host）。 */
+  private commandContext(): CommandContext {
+    const host = this;
+    return {
+      cfg: host.cfg,
+      agent: host.agent,
+      classifier: host.classifier,
+      sessionId: host.sessionId,
+      get mode() {
+        return host.mode;
+      },
+      now: () => host.now(),
+      emit: (event, durable) => host.emit(event, durable),
+      emitMeta: () => host.emitMeta(),
+      contextState: (usageRatio) => host.contextState(usageRatio),
+      usageCostMicros: () => host.usageTotals.costMicros,
+      clearSession: () => {
+        host.agent.reset();
+        host.persistMessages(null, null);
+        host.emit({ type: "session.cleared", at: host.now() }, true);
+      },
+      setMode: (mode) => host.setMode(mode),
+      rename: (title) => host.rename(title),
+    };
   }
 
   /* ------------------------------------------------------------------ */
@@ -1742,14 +1652,6 @@ interface LockOwner {
   startedAt: string;
 }
 
-function runRoot(): string {
-  return envOf("NEO_RUN_DIR") ?? join(homedir(), ".neo", "run");
-}
-
-function lockDirOf(id: string): string {
-  return join(runRoot(), "locks", id);
-}
-
 function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -1816,7 +1718,7 @@ function readLockOwnerSettled(dir: string): LockOwner | null {
  *    仍无 owner 才按 stale 接管，避免误抢正在启动的活进程。
  */
 export function acquireSessionLock(id: string, epoch: string, now: () => number): string {
-  const dir = lockDirOf(id);
+  const dir = lockDirPath(id);
   mkdirSync(dirname(dir), { recursive: true, mode: 0o700 });
   const owner: LockOwner = { pid: process.pid, epoch, startedAt: isoAt(now()) };
 
@@ -1863,6 +1765,93 @@ export function acquireSessionLock(id: string, epoch: string, now: () => number)
   throw hostError("conflict", `会话 ${id} 的锁竞争失败（${dir}）`);
 }
 
+/**
+ * Config → 协议 `SettingsView`（掩码）。
+ *
+ * 抽成模块级纯函数（v0.0.2 收尾）：
+ *  - host 的 `configView()` 直接调它（行为不变）；
+ *  - Hub 在「未 attach 会话」时用 `loadConfig({cwd}) + buildSettingsView(cfg)` 回
+ *    `settings.get`，不必为取一份设置去 spawn worker。
+ */
+export function buildSettingsView(cfg: Config): SettingsView {
+  const resolvedRoutes = MODEL_TIERS.map((tier) => {
+    const route = cfg.routes[tier];
+    const provider = route?.provider ?? cfg.providerName;
+    const p = cfg.providers.find((x) => x.name === provider);
+    const model = route?.model || p?.models[tier] || cfg.model;
+    return {
+      tier: tier as Tier,
+      provider,
+      model,
+      fallbackAllowed: route?.fallbackAllowed ?? true,
+    };
+  });
+  return {
+    defaultProvider: cfg.providerName,
+    defaultTier: cfg.modelTier as Tier,
+    classifierProvider: cfg.classifierProvider,
+    classifierModelName: cfg.classifierModel,
+    providers: cfg.providers.map((p) => ({
+      providerName: p.name,
+      providerType: p.type,
+      baseUrl: p.baseUrl,
+      apiKeyMask: maskKey(p.apiKey),
+      defaultModelName: p.models.default,
+      deepReasoningModelName: p.models.deep_reasoning,
+      balancedModelName: p.models.balanced,
+      fastModelName: p.models.fast,
+      maxTokens: p.maxTokens ?? cfg.globalDefaults.maxTokens,
+      temperature: p.temperature ?? cfg.globalDefaults.temperature,
+      contextWindow: p.contextWindow ?? cfg.globalDefaults.contextWindow,
+      isDefault: p.name === cfg.providerName,
+    })),
+    routes: resolvedRoutes,
+    compactThreshold: cfg.compactThreshold,
+    maxToolIterations: cfg.maxToolIterations,
+    toolOutputLimit: cfg.toolOutputLimit,
+    shell: {
+      path: cfg.shell?.path ?? null,
+      login: cfg.shell?.login ?? true,
+      args: cfg.shell?.args ?? null,
+    },
+    retry: {
+      maxAttempts: cfg.retry?.maxAttempts ?? 3,
+      connectTimeoutMs: cfg.retry?.connectTimeoutMs ?? 30_000,
+      streamIdleTimeoutMs: cfg.retry?.streamIdleTimeoutMs ?? 120_000,
+    },
+    showReasoning: cfg.showReasoning,
+    toolcallInfoDetails: cfg.toolcallInfoDetails,
+    memory: {
+      enabled: cfg.memory.enabled,
+      autoRecall: cfg.memory.autoRecall.enabled,
+      autoCapture: cfg.memory.autoCapture.enabled,
+      journalRetentionDays: cfg.memory.autoCapture.journalRetentionDays,
+      userWikiDir: cfg.memory.userWikiDir,
+    },
+    env: {
+      enabled: cfg.env?.enabled !== false,
+      probeTtlHours: cfg.env?.probeTtlHours ?? 12,
+      prompt: cfg.env?.prompt !== false,
+      wikiPage: cfg.env?.wikiPage !== false,
+    },
+    team: {
+      skillsExtraPaths: cfg.skillsExtraPaths ?? [],
+      // SettingsView 只暴露 auto|hold|off：accept→auto（按接收方权限档），refuse→off。
+      crossSessionInbound:
+        cfg.crossSessionInbound === "accept"
+          ? "auto"
+          : cfg.crossSessionInbound === "refuse"
+            ? "off"
+            : cfg.crossSessionInbound,
+      crossSessionAutoTurnLimit: cfg.mailbox.autoTurnLimit,
+      crossSessionHeartbeatMs: cfg.mailbox.heartbeatMs,
+      crossSessionDeadAfterMs: cfg.mailbox.deadAfterMs,
+      crossSessionProgressTimeoutMs: cfg.mailbox.progressTimeoutMs,
+      crossSessionWatchdogIntervalS: cfg.mailbox.watchdogIntervalS,
+    },
+  };
+}
+
 function hostError(code: string, message: string): Error & { code: string } {
   const e = new Error(message) as Error & { code: string };
   e.code = code;
@@ -1879,18 +1868,6 @@ function isMode(v: unknown): v is ProtocolPermissionMode {
 
 function turnOf(event: SessionEvent): string | undefined {
   return (event as { turnId?: string }).turnId;
-}
-
-function ok(blocks: ViewBlock[]): CommandOutcome {
-  return { ok: true, blocks };
-}
-
-function fail(code: string, message: string): CommandOutcome {
-  return {
-    ok: false,
-    blocks: [{ kind: "notice", level: "error", text: message }],
-    error: { code, message },
-  };
 }
 
 /** 轮末/中止后修复 messages 尾部：不留悬空 assistant(tool_calls) 与孤立 tool 结果。 */
@@ -1954,6 +1931,41 @@ function saveSessionAtomically(messages: Message[], meta: PersistedMeta, finalPa
   const tmpPath = `${finalPath}.tmp`;
   saveSession(messages, { ...meta, path: tmpPath } as NeoSessionMeta);
   renameSync(tmpPath, finalPath);
+}
+
+/**
+ * 严格 base64 校验（附件用）：只允许标准字符集、长度为 4 的倍数、且可往返编码。
+ * Buffer.from 对非法输入会静默丢弃字符，所以「解码后非空」不足以证明输入合法。
+ */
+function strictBase64(raw: string, index: number): string {
+  const b64 = typeof raw === "string" ? raw.replace(/\s+/g, "") : "";
+  if (b64 === "") throw hostError("protocol", `附件 #${index} 的 dataBase64 为空`);
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64) || b64.length % 4 !== 0) {
+    throw hostError("protocol", `附件 #${index} 的 dataBase64 不是合法 base64`);
+  }
+  const bytes = Buffer.from(b64, "base64");
+  if (bytes.length === 0) throw hostError("protocol", `附件 #${index} 的 base64 解码失败`);
+  if (bytes.toString("base64") !== b64) {
+    throw hostError("protocol", `附件 #${index} 的 base64 不是规范编码（往返不一致）`);
+  }
+  return b64;
+}
+
+/** magic bytes → 实际图片类型（null = 不是支持的图片）。 */
+function sniffImageMime(bytes: Buffer): "image/png" | "image/jpeg" | "image/webp" | null {
+  const png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (bytes.length >= 8 && png.every((b, i) => bytes[i] === b)) return "image/png";
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
+    bytes.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  return null;
 }
 
 /** 持久化/transcript 失败告警：stderr（core 不用 console，日志只走 stderr 或注入 Logger）。 */
@@ -2036,74 +2048,5 @@ function readTranscript(path: string): LoadedTranscript {
   const maxSeq = entries.reduce((m, e) => (e.seq > m ? e.seq : m), 0);
   return { header: parsedHeader, entries, maxSeq };
 }
-
-/**
- * 命令是否修改会话状态（M2 轮中保护用）。
- * 带「无参数 = 查询」语义的命令，只有带参数时才算修改。
- */
-function isMutatingCommand(cmd: string, args: string[]): boolean {
-  const first = (args[0] ?? "").trim();
-  switch (cmd) {
-    case "clear":
-    case "compact":
-    case "rename":
-    case "fast":
-    case "balanced":
-    case "deep":
-    case "deep_reasoning":
-    case "default":
-      return true;
-    case "tier":
-    case "mode":
-    case "model":
-    case "provider":
-    case "auto":
-      return first !== "";
-    default:
-      return false;
-  }
-}
-
-const COMMAND_SUBSET = [
-  "help",
-  "clear",
-  "compact",
-  "context",
-  "cost",
-  "tier",
-  "fast",
-  "balanced",
-  "deep",
-  "default",
-  "mode",
-  "tools",
-  "history",
-  "why",
-  "auto",
-  "provider",
-  "model",
-  "rename",
-];
-
-const HELP_TEXT = [
-  "## Matrix-Core 命令",
-  "",
-  "- `/help` — 命令列表",
-  "- `/clear` — 清空上下文（保留系统提示与身份）",
-  "- `/compact` — 压缩历史上下文",
-  "- `/context` — 上下文窗口与用量",
-  "- `/cost` — 模型/用量/计价",
-  "- `/tier [name]` — 查看或切换档位（fast / balanced / deep / default）",
-  "- `/mode [1-4]` — 权限模式（ask / auto-edit / auto-all / plan）",
-  "- `/tools` — 可用工具",
-  "- `/history` — 最近用户消息",
-  "- `/why` — 最近一次档位判定",
-  "- `/auto [off|rule|llm]` — 自动分类器",
-  "- `/provider [name]` — 供应商",
-  "- `/model [name]` — 模型",
-  "- `/rename <title>` — 会话标题",
-  "",
-  "其余命令返回 `ok:false`（v0.0.1 只实现以上子集）。",
-].join("\n");
 
 export { SessionHost };

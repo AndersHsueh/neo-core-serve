@@ -27,6 +27,8 @@ export const CORE_CAPABILITIES: readonly string[] = [
   "snapshot.live",
   "activity",
   "question.multi",
+  "transcript.replay",
+  "attachments.image",
 ];
 
 export function readyFrame(host: HostPort, coreVersion: string): ServerMessage {
@@ -103,7 +105,7 @@ export async function dispatchCommand(deps: DispatchDeps, id: string, command: C
         fail("unsupported", "v0.0.1 单会话模式不支持 close；请退出 core 进程", false);
         return;
       case "turn.send": {
-        const { turnId } = await host.send(command.text, command.refs, command.clientId);
+        const { turnId } = await host.send(command.text, command.refs, command.clientId, command.attachments);
         ok({ turnId });
         return;
       }
@@ -128,6 +130,15 @@ export async function dispatchCommand(deps: DispatchDeps, id: string, command: C
       case "command.run": {
         const outcome = await host.runCommand(command.name, command.args);
         ok({ ok: outcome.ok, blocks: outcome.blocks, changes: outcome.changes, error: outcome.error });
+        return;
+      }
+      case "transcript.fetch": {
+        if (command.sessionId && command.sessionId !== host.sessionId) {
+          fail("not_found", `会话 ${command.sessionId} 不存在（当前 ${host.sessionId}）`);
+          return;
+        }
+        const data = host.fetchTranscript(command.fromSeq, command.limit);
+        ok(data);
         return;
       }
       case "settings.get":
@@ -162,7 +173,7 @@ export async function dispatchCommand(deps: DispatchDeps, id: string, command: C
     // 只暴露协议内错误码；Node errno/内部错误统一 internal，避免客户端按未知 code 乱重试。
     const known: ReadonlySet<string> = new Set([
       "unauthorized","forbidden","not_found","conflict","rate_limited","timeout",
-      "approval_expired","question_expired","session_gone","slow_consumer","unsupported","protocol","internal",
+      "approval_expired","question_expired","session_gone","slow_consumer","unsupported","too_large","protocol","internal",
     ]);
     const code: HubErrorCode = e.code && known.has(e.code) ? (e.code as HubErrorCode) : "internal";
     const retryable = code === "internal" || code === "timeout" || code === "rate_limited";

@@ -78,6 +78,7 @@ const COMMAND_TYPES = new Set<ClientCommand["type"]>([
   "settings.get",
   "settings.patch",
   "mode.set",
+  "transcript.fetch",
   "usage.summary",
   "ping",
 ]);
@@ -272,6 +273,9 @@ export function decodeClientMessage(raw: unknown): DecodeResult<ClientCommand> {
           const x = need(key, "string");
           if (!x.ok) return x;
         }
+        if ("attachments" in command && !isArr(command["attachments"])) {
+          return fail("turn.send: attachments must be array");
+        }
       }
       break;
     }
@@ -302,6 +306,11 @@ export function decodeClientMessage(raw: unknown): DecodeResult<ClientCommand> {
     }
     case "settings.patch": {
       if (!isRec(command.patch)) return fail("settings.patch: patch must be object");
+      break;
+    }
+    case "transcript.fetch": {
+      if ("fromSeq" in command && !isNum(command["fromSeq"])) return fail("transcript.fetch: bad fromSeq");
+      if ("limit" in command && !isNum(command["limit"])) return fail("transcript.fetch: bad limit");
       break;
     }
     default:

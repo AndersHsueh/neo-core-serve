@@ -1,15 +1,16 @@
 {
-  "protocolVersion": "1.1",
+  "protocolVersion": "1.2",
   "wireVersion": 1,
   "sourceRepo": "neo-agent-app/gui/src/protocol",
   "sourceCommit": "a52f1f02d034ddfda14e9440ea1764eeea790d10",
   "frozenAt": "2026-10-28",
   "files": {
-    "src/protocol/types.ts": "f68cf2410ed3386e8519eee016837f40c95dbcdb7ace8dc170cd97610f35cc04",
-    "src/protocol/guards.ts": "2d3fec9feb32464ec7d63b729c9acfafc20a9b8671675787fc24e9f96c412edd",
+    "src/protocol/types.ts": "dd292399d28ccd3f15a2e3207b35dbbd44c831b9161cf777eb7bdfa97788d6c1",
+    "src/protocol/guards.ts": "d61615b6ca88e9c4a6aa5f35100cc1f93767fabf432e86a906d1b128c8baf221",
     "src/protocol/fixtures.ts": "403d7c42d530dcdd06d6aff7d1bcfea4157184cdb6121cf2eacce882455267b6",
     "src/protocol/reducer.ts": "6ee27df51ebcb05dd7bd3820d60a9b62ad9b397a54e7d0523f2555e917b244f8",
-    "src/protocol/commands.ts": "745d083f904fd8c8952236cc585240468a63b0c9fb1839cd09d86a97f0ef7748",
+    "src/protocol/commands.ts": "fd5b5804c5d209828712f61c8385f46775e0ae9fb945a59d258ab9df54273160",
+    "src/protocol/commands.json": "bd7c9df868a4e705a0218641500d1426ffea6b8a82915cf2efc274bf7409861c",
     "src/protocol/index.ts": "3008cbebd0654d0593081ef9ca9940b4a69512f296b20759a11205be02a75774"
   }
 }

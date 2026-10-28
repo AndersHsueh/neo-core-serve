@@ -4,10 +4,12 @@
  * 只绑 127.0.0.1；token 子协议鉴权；Origin 白名单；stdout 不写日志。
  */
 import type { Server, ServerWebSocket } from "bun";
-import { decodeFrame } from "./stdio.ts";
+import { decodeFrame, frameTooLarge, tooLargeResult } from "./frames.ts";
+import { EventBatcher } from "./batcher.ts";
 import { dispatchCommand, eventFrame, readyFrame } from "./dispatch.ts";
 import { tokenFromProtocols, tokenMatches } from "./auth.ts";
 import type { HostPort } from "./types.ts";
+import { PROTOCOL_SEMVER } from "../protocol/types.ts";
 import type { ServerMessage } from "../protocol/types.ts";
 
 export interface WsOptions {
@@ -34,7 +36,7 @@ function originAllowed(origin: string | null): boolean {
 }
 
 export function startWsServer(opts: WsOptions): WsHandle {
-  const clients = new Set<ServerWebSocket<{ id: string }>>();
+  const clients = new Map<ServerWebSocket<{ id: string }>, EventBatcher>();
   const log = (line: string): void => {
     process.stderr.write(`${line}\n`);
   };
@@ -48,7 +50,7 @@ export function startWsServer(opts: WsOptions): WsHandle {
         return Response.json({
           ok: true,
           coreVersion: opts.coreVersion,
-          protocolVersion: "1.1",
+          protocolVersion: PROTOCOL_SEMVER,
           state: "idle",
           uptimeMs: Math.round(performance.now()),
         });
@@ -77,12 +79,43 @@ export function startWsServer(opts: WsOptions): WsHandle {
     },
     websocket: {
       open(ws) {
-        clients.add(ws);
+        const batcher = new EventBatcher({
+          send: (frame) => {
+            if (ws.readyState !== WebSocket.OPEN) return;
+            if ((ws.getBufferedAmount?.() ?? 0) > 4 * 1024 * 1024) {
+              try {
+                ws.close(4408, "slow consumer");
+              } catch {
+                /* closed */
+              }
+              clients.delete(ws);
+              return;
+            }
+            try {
+              ws.send(JSON.stringify(frame));
+            } catch {
+              /* closed */
+            }
+          },
+          onOverflow: () => {
+            try {
+              ws.close(4408, "slow consumer");
+            } catch {
+              /* closed */
+            }
+            clients.delete(ws);
+          },
+        });
+        clients.set(ws, batcher);
         ws.send(JSON.stringify(readyFrame(opts.host, opts.coreVersion)));
       },
       async message(ws, raw) {
         try {
           const text = typeof raw === "string" ? raw : decoder.decode(raw);
+          if (frameTooLarge(text)) {
+            ws.send(JSON.stringify(tooLargeResult(text)));
+            return;
+          }
           const decoded = decodeFrame(text);
           if (!decoded.ok) {
             ws.send(JSON.stringify({ v: 1, kind: "result", id: decoded.id, ok: false, error: decoded.error }));
@@ -104,6 +137,7 @@ export function startWsServer(opts: WsOptions): WsHandle {
         }
       },
       close(ws) {
+        clients.get(ws)?.close();
         clients.delete(ws);
       },
     },
@@ -111,14 +145,8 @@ export function startWsServer(opts: WsOptions): WsHandle {
 
   const unsub = opts.host.onEvent((event) => {
     if (clients.size === 0) return; // 无人订阅时不序列化
-    const frame = JSON.stringify(eventFrame(opts.host, event));
-    for (const ws of clients) {
-      try {
-        ws.send(frame);
-      } catch {
-        clients.delete(ws);
-      }
-    }
+    const frame = eventFrame(opts.host, event);
+    for (const batcher of clients.values()) batcher.enqueue(frame);
   });
 
   log(`[matrix-core] ws listening on ws://127.0.0.1:${server.port}/ws`);
@@ -128,7 +156,8 @@ export function startWsServer(opts: WsOptions): WsHandle {
     url: `ws://127.0.0.1:${server.port}/ws`,
     async stop() {
       unsub();
-      for (const ws of clients) {
+      for (const [ws, batcher] of clients) {
+        batcher.close();
         try {
           ws.close(1001, "core shutting down");
         } catch {

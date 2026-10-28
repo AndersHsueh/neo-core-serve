@@ -44,6 +44,9 @@ type Scenario =
   | "ask-user-multi"
   | "write-then-answer"
   | "allow-session"
+  | "burst"
+  | "image-detect"
+  | "path-escape"
   | "slow"
   | "resume";
 
@@ -54,6 +57,9 @@ const SCENARIOS: readonly Scenario[] = [
   "ask-user-multi",
   "write-then-answer",
   "allow-session",
+  "burst",
+  "image-detect",
+  "path-escape",
   "slow",
   "resume",
 ];
@@ -85,6 +91,7 @@ const MODEL = "fake-model";
 const STREAM_DELAY_MS = envInt("STREAM_DELAY_MS", 2, 0);
 const SLOW_DELAY_MS = envInt("SLOW_DELAY_MS", 120, 1);
 const SLOW_FRAMES = envInt("SLOW_FRAMES", 10, 1);
+const BURST_FRAMES = envInt("BURST_FRAMES", 120, 1);
 
 function normalizePort(raw: string | undefined): number {
   if (raw === undefined || raw.trim() === "") return 18123;
@@ -341,6 +348,48 @@ function framesFor(scenario: Scenario, messages: WireMessage[]): string[] {
       return [...contentFrames("全部完成。"), usageFrame(), ...finishFrames("stop")];
     }
 
+    case "burst": {
+      // 高频 delta（条数由 BURST_FRAMES 控制）：WS 合批/背压与 reducer 快路径用。
+      // 文本可精确重建：第 i 块固定为 `${i}.`，最后一块为 END。
+      const frames: string[] = [];
+      for (let i = 0; i < BURST_FRAMES; i++) frames.push(frame({ content: `${i}.` }));
+      frames.push(frame({ content: "END" }));
+      frames.push(usageFrame(BURST_FRAMES, BURST_FRAMES, 0), ...finishFrames("stop"));
+      return frames;
+    }
+
+    case "image-detect": {
+      // 附件用例：把最后一条 user 消息里的 image_url 数量回显给客户端，
+      // 证明附件不仅被接收，还真的进了发给模型的 messages。
+      const lastUser = [...messages].reverse().find((m) => m.role === "user");
+      const count = imagePartsOf(lastUser?.content).length;
+      return [...contentFrames(`SAW_IMAGES_${count}`), usageFrame(), ...finishFrames("stop")];
+    }
+
+    case "path-escape": {
+      // PathPolicy 工具级负样本：越界读 /etc/passwd + 越界写 ../../escaped.txt。
+      if (rounds === 0) {
+        return [
+          ...contentFrames("先读一个越界路径。"),
+          ...toolCallFrames("call_fake_escape_read", "read_file", ['{"path":"/etc/passwd"}']),
+          usageFrame(),
+          ...finishFrames("tool_calls"),
+        ];
+      }
+      if (rounds === 1) {
+        return [
+          ...contentFrames("再写一个越界路径。"),
+          ...toolCallFrames("call_fake_escape_write", "write_file", [
+            '{"path":"../../escaped.txt",',
+            '"content":"should never be written\\n"}',
+          ]),
+          usageFrame(),
+          ...finishFrames("tool_calls"),
+        ];
+      }
+      return [...contentFrames("越界操作都被拒了。"), usageFrame(), ...finishFrames("stop")];
+    }
+
     case "slow": {
       // 用于 turn.abort：首帧立刻到，之后每 SLOW_DELAY_MS 一帧，留出中断窗口。
       if (rounds > 0) return [...contentFrames("慢回答完成。"), usageFrame(), ...finishFrames("stop")];
@@ -371,11 +420,25 @@ function framesFor(scenario: Scenario, messages: WireMessage[]): string[] {
 /* 请求留痕（仅内存）                                                  */
 /* ------------------------------------------------------------------ */
 
+/** 图片 part 摘要（不落原图，只留大小/mime 便于断言）。 */
+export interface ImagePartRecord {
+  mime: string;
+  /** data URL base64 解码后的近似字节数 */
+  approxBytes: number;
+  urlPrefix: string;
+}
+
 interface RequestRecord {
   at: number;
   scenario: Scenario;
-  /** 只留 {role, content 文本, tool_call_id}，便于断言且不落盘。 */
-  messages: { role: string; content: string; toolCallId?: string; name?: string }[];
+  /** 只留 {role, content 文本, tool_call_id, images}，便于断言且不落盘。 */
+  messages: {
+    role: string;
+    content: string;
+    toolCallId?: string;
+    name?: string;
+    images?: ImagePartRecord[];
+  }[];
 }
 
 const MAX_RECORDS = 50;
@@ -395,6 +458,24 @@ function textOf(content: unknown): string {
   return "";
 }
 
+function imagePartsOf(content: unknown): ImagePartRecord[] {
+  if (!Array.isArray(content)) return [];
+  const out: ImagePartRecord[] = [];
+  for (const part of content) {
+    if (typeof part !== "object" || part === null) continue;
+    const p = part as { type?: string; image_url?: { url?: unknown } };
+    if (p.type !== "image_url" || typeof p.image_url?.url !== "string") continue;
+    const url = p.image_url.url;
+    const m = /^data:([^;,]+);base64,/.exec(url);
+    out.push({
+      mime: m?.[1] ?? "unknown",
+      approxBytes: Math.floor(((url.length - (m?.[0].length ?? 0)) * 3) / 4),
+      urlPrefix: url.slice(0, 32),
+    });
+  }
+  return out;
+}
+
 function remember(messages: WireMessage[]): void {
   records.push({
     at: Date.now(),
@@ -404,6 +485,10 @@ function remember(messages: WireMessage[]): void {
       content: textOf(m.content),
       ...(typeof m.tool_call_id === "string" ? { toolCallId: m.tool_call_id } : {}),
       ...(typeof m.name === "string" ? { name: m.name } : {}),
+      ...(() => {
+        const images = imagePartsOf(m.content);
+        return images.length > 0 ? { images } : {};
+      })(),
     })),
   });
   if (records.length > MAX_RECORDS) records.splice(0, records.length - MAX_RECORDS);

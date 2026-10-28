@@ -17,6 +17,7 @@ const FILES = [
   "src/protocol/fixtures.ts",
   "src/protocol/reducer.ts",
   "src/protocol/commands.ts",
+  "src/protocol/commands.json",
   "src/protocol/index.ts",
 ];
 

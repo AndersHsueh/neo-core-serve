@@ -16,14 +16,16 @@ import { PROTOCOL_SEMVER, PROTOCOL_VERSION } from "./protocol/types.ts";
 import { clearRunInfo, defaultTokenFile, loadOrCreateToken, runFile, runDir, writeRunInfo } from "./serve/auth.ts";
 import { runStdio } from "./serve/stdio.ts";
 import { startWsServer } from "./serve/ws.ts";
+import { startHub } from "./hub/server.ts";
 
-const CORE_VERSION = "0.0.1";
+const CORE_VERSION = "0.0.2";
 
 const HELP = `matrix-core（Matrix-Core）v${CORE_VERSION}
 
 用法：
   matrix-core serve [--cwd DIR] [--resume ID] [--mode MODE] [--tier TIER]
                     [--port N] [--stdio] [--dev-auth] [--token-file PATH]
+  matrix-core hub [--cwd DIR] [--port N] [--dev-auth] [--token-file PATH]
   matrix-core status
   matrix-core stop
   matrix-core doctor
@@ -177,6 +179,59 @@ async function cmdServe(argv: string[]): Promise<number> {
   return 0;
 }
 
+async function cmdHub(argv: string[]): Promise<number> {
+  const args = parseServeArgs(argv);
+  const token = loadOrCreateToken(args.tokenFile);
+  const hub = startHub({
+    port: args.port,
+    token,
+    devAuth: args.devAuth,
+    defaultCwd: args.cwd,
+    coreVersion: CORE_VERSION,
+  });
+  writeRunInfo(runFile(), {
+    url: hub.url,
+    pid: process.pid,
+    tokenFile: args.tokenFile,
+    sessionId: "",
+    epoch: "",
+    startedAt: new Date().toISOString(),
+  });
+  process.stderr.write(
+    `matrix-core hub v${CORE_VERSION}\n  ws=${hub.url}\n  cwd=${args.cwd}\n  token=${args.tokenFile}\n  run=${runFile()}\n`,
+  );
+  let closing = false;
+  const shutdown = async (code: number): Promise<void> => {
+    if (closing) return;
+    closing = true;
+    try {
+      await hub.stop();
+    } catch (error) {
+      process.stderr.write(`matrix-core: hub stop failed: ${(error as Error).message}\n`);
+    }
+    try {
+      clearRunInfo(runFile());
+    } catch {
+      /* ignore */
+    }
+    process.exit(code);
+  };
+  process.on("SIGINT", () => void shutdown(130));
+  process.on("SIGTERM", () => void shutdown(0));
+  process.on("uncaughtException", (error) => {
+    process.stderr.write(`matrix-core: uncaught: ${error.message}\n`);
+    void shutdown(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    process.stderr.write(`matrix-core: unhandled rejection: ${String(reason)}\n`);
+    void shutdown(1);
+  });
+  await new Promise<void>(() => {
+    /* never resolves; shutdown exits */
+  });
+  return 0;
+}
+
 function cmdStatus(): number {
   const file = runFile();
   if (!existsSync(file)) {
@@ -253,6 +308,8 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       case "serve":
         return await cmdServe(rest);
+      case "hub":
+        return await cmdHub(rest);
       case "status":
         return cmdStatus();
       case "stop":

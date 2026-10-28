@@ -1,0 +1,2 @@
+---- docs ----
+docs:check OK（30 个 md，7 个协议文件，commands.json 一致）

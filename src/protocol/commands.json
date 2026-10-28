@@ -1,0 +1,251 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-28",
+  "commands": [
+    {
+      "name": "help",
+      "aliases": [],
+      "group": "session",
+      "args": [],
+      "description": "列出可用命令",
+      "mutates": false,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "clear",
+      "aliases": [],
+      "group": "session",
+      "args": [],
+      "description": "清空上下文（保留系统提示与会话身份）",
+      "mutates": true,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "compact",
+      "aliases": [],
+      "group": "session",
+      "args": [],
+      "description": "压缩历史上下文为结构化摘要",
+      "mutates": true,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "context",
+      "aliases": [],
+      "group": "session",
+      "args": [],
+      "description": "上下文窗口、估算用量与最近压缩",
+      "mutates": false,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "cost",
+      "aliases": [],
+      "group": "session",
+      "args": [],
+      "description": "模型、用量与计价（v0.0.x 未计价）",
+      "mutates": false,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "history",
+      "aliases": [],
+      "group": "session",
+      "args": [],
+      "description": "最近 10 条用户消息",
+      "mutates": false,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "why",
+      "aliases": [],
+      "group": "session",
+      "args": [],
+      "description": "最近一次档位判定（分类器）",
+      "mutates": false,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "auto",
+      "aliases": [],
+      "group": "session",
+      "args": [
+        {
+          "name": "classifier",
+          "type": "enum",
+          "required": false,
+          "enum": [
+            "off",
+            "rule",
+            "llm"
+          ]
+        }
+      ],
+      "description": "查看或切换自动档位分类器",
+      "mutates": true,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "rename",
+      "aliases": [],
+      "group": "session",
+      "args": [
+        {
+          "name": "title",
+          "type": "string",
+          "required": true,
+          "description": "新标题"
+        }
+      ],
+      "description": "修改会话标题",
+      "mutates": true,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "tier",
+      "aliases": [],
+      "group": "model",
+      "args": [
+        {
+          "name": "tier",
+          "type": "enum",
+          "required": false,
+          "enum": [
+            "fast",
+            "balanced",
+            "deep",
+            "deep_reasoning",
+            "default"
+          ],
+          "description": "目标档位"
+        }
+      ],
+      "description": "查看或切换模型档位",
+      "mutates": true,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "fast",
+      "aliases": [],
+      "group": "model",
+      "args": [],
+      "description": "切换到 fast 档位",
+      "mutates": true,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "balanced",
+      "aliases": [],
+      "group": "model",
+      "args": [],
+      "description": "切换到 balanced 档位",
+      "mutates": true,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "deep",
+      "aliases": [
+        "deep_reasoning"
+      ],
+      "group": "model",
+      "args": [],
+      "description": "切换到 deep_reasoning 档位",
+      "mutates": true,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "default",
+      "aliases": [],
+      "group": "model",
+      "args": [],
+      "description": "切换到 default 档位",
+      "mutates": true,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "mode",
+      "aliases": [],
+      "group": "model",
+      "args": [
+        {
+          "name": "mode",
+          "type": "enum",
+          "required": false,
+          "enum": [
+            "ask",
+            "auto-edit",
+            "auto-all",
+            "plan",
+            "1",
+            "2",
+            "3",
+            "4"
+          ],
+          "description": "权限模式（名称或序号）"
+        }
+      ],
+      "description": "查看或切换权限模式",
+      "mutates": true,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "provider",
+      "aliases": [],
+      "group": "model",
+      "args": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": false,
+          "description": "名称（留空 = 查看）"
+        }
+      ],
+      "description": "查看或切换 provider",
+      "mutates": true,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "model",
+      "aliases": [],
+      "group": "model",
+      "args": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": false,
+          "description": "名称（留空 = 查看）"
+        }
+      ],
+      "description": "查看或切换模型名",
+      "mutates": true,
+      "since": "1.2",
+      "core": true
+    },
+    {
+      "name": "tools",
+      "aliases": [],
+      "group": "tools",
+      "args": [],
+      "description": "列出运行时可用工具",
+      "mutates": false,
+      "since": "1.2",
+      "core": true
+    }
+  ]
+}

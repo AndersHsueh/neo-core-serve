@@ -105,7 +105,7 @@ describe.skipIf(!available)("stdio e2e", () => {
       expect(typeof ready.user.displayName).toBe("string");
       expect(typeof ready.coreVersion).toBe("string");
       expect(ready.coreVersion).toMatch(/^\d+\.\d+\.\d+/);
-      expect(ready.protocolVersion).toBe("1.1");
+      expect(ready.protocolVersion).toBe("1.2");
       expect(Array.isArray(ready.capabilities)).toBe(true);
       for (const cap of ["turn.aborted", "command.structured", "snapshot.live", "mode.set"]) {
         expect(ready.capabilities).toContain(cap);
@@ -169,7 +169,7 @@ describe.skipIf(!available)("stdio e2e", () => {
     TIMEOUT,
   );
 
-  test("ping → pong（协议 v1.1：只回 pong 帧，不带 result）", async () => {
+  test("ping → pong（协议 v1.2：只回 pong 帧，不带 result）", async () => {
     const e = await setup("ping");
     const core = await e.startCore();
     const mark = core.mark();

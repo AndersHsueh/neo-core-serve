@@ -299,9 +299,12 @@ matrix-core serve [--cwd DIR] [--resume ID] [--port 0]
 - **锁**：`run/locks/<id>/`（mkdir 独占 + owner.json）；与 mailbox `.alive` **互认**：任一存在即拒绝双开（D15）。`.alive` 缺失（如 `-p` 非交互 CLI）时，core 仍持自己的锁，并在打开/落盘前校验会话文件未被外部改动（mtime/hash），发现变化 → `session_gone`。
 - 关闭：SIGTERM/SIGINT → abort → 修复 → flush → persist → 释放锁（10s 宽限，二次信号强退）。
 
-### 13.2 v0.5 Hub
+### 13.2 本地 Hub（v0.0.2 已实现，v0.5 增强）
 
-- 注册表 + 每会话 worker；`session.*` 全量；空闲回收/崩溃重启；Hub 不写会话文件。
+- 注册表 + 每会话 worker（`matrix-core serve --stdio` 子进程）；Hub 不内嵌 Agent、不写会话文件。
+- 实现：`session.list/create/attach/detach/close/rename`；未绑定连接一律 conflict；每会话同时一个客户端。
+- worker 崩溃/退出：Hub 删除入口并向 owner 推 `session.status{dead}`；再次 attach 会 `--resume` 重新拉起。
+- 未实现（v0.5）：空闲回收、自动崩溃重启、多客户端租约、跨机 Hub。
 - worker stdout 只走协议、日志 stderr；cwd/config/env 在 spawn 时确定。
 
 ### 13.3 mailbox
@@ -316,16 +319,16 @@ matrix-core serve [--cwd DIR] [--resume ID] [--port 0]
 - **ACL**：`serve/mapping.ts` 映射 CoreEvent→SessionEvent（透传 seq/epoch）、CommandOutcome→ViewBlock。
 - **鉴权**：token 0600；WS 子协议；Origin 白名单；失败直接 4401。
 - **stdio**：无鉴权；stdout 只出帧。
-- **帧上限** 1MB；大输出走 outputRef。
+- **帧上限** 8MB（v0.0.2 图片附件）；单连接事件经 `batcher`：16ms/4KB/64 帧 flush、delta 合并、队列超限丢 ephemeral/关闭 4408。
 - **seq/epoch 校验**：见 §5.2；不匹配走快照。
 
 ---
 
 ## 15. 版本与兼容
 
-- core semver tag；协议 v1（1.1 语义），只做加法；破坏性 → v2。
+- core semver tag；协议 v1（v0.0.2 = 1.2 语义），只做加法；破坏性 → v2。
 - `ready` 带 `coreVersion/protocolVersion/capabilities/epoch`；客户端按能力降级。
-- **v0.0.1 实际能力子集**：`turn.aborted`、`command.structured`、`mode.set`、`snapshot.live`、`activity`、`question.multi`；不广告 `transcript.replay`/`peers`/`approval.diff.optional`。
+- **v0.0.2 实际能力**：单会话 `turn.aborted/command.structured/mode.set/snapshot.live/activity/question.multi/transcript.replay/attachments.image`；Hub 追加 `sessions`。不广告 `peers`/`approval.diff.optional`。
 - 契约 fixtures 单源；客户端 vendor + `protocol.lock.json`。
 - 服务器兼容矩阵：core 至少兼容前一个协议的客户端（N-1 policy）。
 
@@ -349,6 +352,8 @@ matrix-core serve [--cwd DIR] [--resume ID] [--port 0]
 ---
 
 ## 17. 安全模型
+
+- **PathPolicy（v0.0.2 已接入）**：read/write/edit/list/glob/grep、refs、checkpoint undo、export 的路径统一 realpath + symlink + cwd 边界；`~/.neo` 用户级目录显式豁免；shell 不受限。
 
 - 只绑 `127.0.0.1`；token 0600；默认随机端口。
 - 策略只在 core；客户端只回答。
@@ -406,13 +411,16 @@ matrix-core serve [--cwd DIR] [--resume ID] [--port 0]
 
 见 [decisions.md](decisions.md)（D1–D15）。
 
-## 23. v0.0.1 已知偏差 / 未交付
+## 23. v0.0.2 已知偏差 / 未交付
 
-- 快照在 host 内生成（目标形态在 serve）；v0.0.2 调整。
-- 审批无断线宽限 / `no_client` / 滑动 deadline（只有固定超时 + allow-session 内存 allowlist）。
-- WS 无合批/背压（协议 §9 的 16ms/4KB、512 帧/8MB、4408 未实现）。
-- 未实现：`transcript.fetch`/`output.get`/`checkpoint.*`/`session.export`/`peers.list`/附件/图片/多会话 Hub。
-- 崩溃恢复采用保守策略：半轮一律补 `turn.aborted{crash}`（不按 meta.lastTurnId 推断完成）。
+- 快照仍由 core host 复用 protocol reducer 生成（目标形态在 serve）；留待清理。
+- `core/ui/**` 兼容层仍在（agent/tools 编译依赖），v0.0.3 删除。
+- Hub：无空闲回收、无自动崩溃重启、单客户端/会话（第二 attach → conflict）；worker 重启依赖再次 attach。
+- `attach` 仍返回完整快照（不做增量补齐）；历史用 `transcript.fetch`。
+- 审批仍无断线宽限 / `no_client` / 滑动 deadline（固定超时 + allow-session 内存 allowlist）。
+- 附件仅图片 base64（≤5 张/5MB/8MB 帧）；无文件/文本附件、无分片/上传通道。
+- 未实现：`output.get`/`checkpoint.*`/`session.export`/`peers.list`/`command.cancel`、多客户端租约、PathPolicy 的 TOCTOU 收口（O_NOFOLLOW 留 v0.0.3）。
+- 崩溃恢复保守：半轮一律补 `turn.aborted{crash}`。
 
 ## 24. 开放问题
 

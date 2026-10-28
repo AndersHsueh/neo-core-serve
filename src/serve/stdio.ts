@@ -5,7 +5,8 @@
  */
 import { createInterface } from "node:readline";
 import { decodeClientMessage } from "../protocol/guards.ts";
-import type { ClientCommand, ServerMessage } from "../protocol/types.ts";
+import { decodeFrame, frameTooLarge, tooLargeResult } from "./frames.ts";
+import type { ServerMessage } from "../protocol/types.ts";
 import { dispatchCommand, eventFrame, makeResult, readyFrame } from "./dispatch.ts";
 import type { HostPort } from "./types.ts";
 
@@ -28,6 +29,10 @@ export async function runStdio(host: HostPort, opts: StdioOptions): Promise<numb
   for await (const line of rl) {
     const text = line.trim();
     if (text === "") continue;
+    if (frameTooLarge(text)) {
+      write(tooLargeResult(text));
+      continue;
+    }
     let raw: unknown;
     try {
       raw = JSON.parse(text);
@@ -50,25 +55,3 @@ export async function runStdio(host: HostPort, opts: StdioOptions): Promise<numb
   return 0;
 }
 
-/** 供 WS 复用：把一条文本帧解码为命令（失败返回错误帧） */
-export function decodeFrame(text: string):
-  | { ok: true; id: string; command: ClientCommand }
-  | { ok: false; id: string; error: { code: string; message: string; retryable: boolean } } {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    return { ok: false, id: "?", error: { code: "protocol", message: "invalid JSON frame", retryable: false } };
-  }
-  const id = (raw as { id?: string }).id ?? "?";
-  const decoded = decodeClientMessage(raw);
-  if (!decoded.ok) {
-    const e = decoded.error;
-    return {
-      ok: false,
-      id,
-      error: { code: e.code, message: e.message, retryable: e.retryable },
-    };
-  }
-  return { ok: true, id, command: decoded.value };
-}

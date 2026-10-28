@@ -95,11 +95,18 @@ if (!coreVersion || coreVersion !== pkg.version) {
   fail(`版本不一致：package.json=${pkg.version} main.ts=${coreVersion}`);
 }
 
-/* 6. commands.json (optional in C0) -------------------------------- */
+/* 6. commands.json: must exist and match the registry ---------------- */
 const catalogPath = join(ROOT, "src/protocol/commands.json");
-if (existsSync(catalogPath)) {
+if (!existsSync(catalogPath)) {
+  fail("commands.json 不存在（跑 bun run commands:gen）");
+} else {
   const cat = JSON.parse(readFileSync(catalogPath, "utf8")) as { commands?: unknown };
   if (!Array.isArray(cat.commands)) fail("commands.json 缺少 commands 数组");
+  const { generateCommandsJson } = await import("../src/core/commands/registry.ts");
+  const expected = generateCommandsJson("check").commands;
+  if (JSON.stringify(cat.commands) !== JSON.stringify(expected)) {
+    fail("commands.json 与命令注册表不一致（跑 bun run commands:gen）");
+  }
 }
 
 if (failures.length > 0) {
@@ -107,4 +114,4 @@ if (failures.length > 0) {
   for (const f of failures) console.error(`  ✖ ${f}`);
   process.exit(1);
 }
-console.log(`docs:check OK（${mdFiles.length} 个 md，${readdirSync(protocolDir).length} 个协议文件）`);
+console.log(`docs:check OK（${mdFiles.length} 个 md，${readdirSync(protocolDir).length} 个协议文件，commands.json 一致）`);

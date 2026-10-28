@@ -5,8 +5,8 @@
  * - 发现：`~/.neo/run/core.json`（原子写，pid 校验）。
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { runDir as coreRunDir, runFile as coreRunFile, tokenFile as coreTokenFile } from "../core/paths.ts";
 
 export interface RunInfo {
   url: string;
@@ -18,15 +18,15 @@ export interface RunInfo {
 }
 
 export function runDir(env: NodeJS.ProcessEnv = process.env): string {
-  return env["NEO_RUN_DIR"] ?? join(homedir(), ".neo", "run");
+  return coreRunDir(env);
 }
 
 export function defaultTokenFile(env: NodeJS.ProcessEnv = process.env): string {
-  return join(runDir(env), "core.token");
+  return coreTokenFile(env);
 }
 
 export function runFile(env: NodeJS.ProcessEnv = process.env): string {
-  return join(runDir(env), "core.json");
+  return coreRunFile(env);
 }
 
 export function loadOrCreateToken(file: string): string {

@@ -79,7 +79,7 @@ describe.skipIf(!available)("WS e2e", () => {
       expect(healthRes.status).toBe(200);
       const health = (await healthRes.json()) as Record<string, unknown>;
       expect(health["ok"]).toBe(true);
-      expect(health["protocolVersion"]).toBe("1.1");
+      expect(health["protocolVersion"]).toBe("1.2");
       expect(String(health["coreVersion"])).toMatch(/^\d+\.\d+\.\d+/);
       expect(typeof health["uptimeMs"]).toBe("number");
       expect(health["state"]).toBe("idle");
@@ -109,7 +109,7 @@ describe.skipIf(!available)("WS e2e", () => {
       expect(ready.user).toMatchObject({ id: "local", role: "owner" });
       expect(ready.sessionId).toBe(info.sessionId);
       expect(ready.epoch).toBe(info.epoch);
-      expect(ready.protocolVersion).toBe("1.1");
+      expect(ready.protocolVersion).toBe("1.2");
       expect(ready.capabilities).toContain("turn.aborted");
       expect(client.nonJsonMessages).toEqual([]);
 
@@ -217,4 +217,37 @@ describe.skipIf(!available)("WS e2e", () => {
     },
     TIMEOUT,
   );
+  test(
+    "超长帧（>8MB）：result ok:false code too_large 且 id 与请求一致；连接不被打断",
+    async () => {
+      const { core, token } = await setup("ws-too-large");
+      client = await WsClient.connect({ url: core.runInfo.url, token });
+      await client.ready();
+
+      // 8MB + 1KB：超过 MAX_FRAME_BYTES（attachments 上限 8MB）。
+      const hugeText = "x".repeat(8 * 1024 * 1024 + 1024);
+      const command = { type: "turn.send", text: hugeText, clientId: "too-large" };
+      const rawFrame = JSON.stringify({ v: 1, kind: "command", id: "too-large-req", command });
+      expect(Buffer.byteLength(rawFrame, "utf8")).toBeGreaterThan(8 * 1024 * 1024);
+
+      const mark = client.mark();
+      const id = client.send(command);
+      // 服务端必须从超长帧里轻量提取 id，保证客户端能把错误关联到请求。
+      const res = await client.awaitResult(id, { since: mark, timeoutMs: 20000 });
+      expect(res.ok).toBe(false);
+      expect(res.id).toBe(id);
+      expect((res.error as any)?.code).toBe("too_large");
+      expect((res.error as any)?.retryable).toBe(false);
+      // 超长帧不得触发一轮。
+      expect(client.eventsSince(mark).length).toBe(0);
+
+      // 连接仍可用（不能因超长帧断连）。
+      const pingMark = client.mark();
+      client.send({ type: "ping" });
+      await client.awaitFrame((f) => f.kind === "pong", "超长帧后 pong", { since: pingMark, timeoutMs: 5000 });
+      void rawFrame;
+    },
+    TIMEOUT,
+  );
+
 });

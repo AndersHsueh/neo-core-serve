@@ -2,11 +2,51 @@
  * 会话持久化。
  * 每次完整对话落盘到 ~/.neo/sessions/<ts>-<id>.json，支持 --resume 恢复。
  */
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ContentPart, Message } from "./llm.ts";
 import type { LastTurnMeta } from "./turnDiagnostics.ts";
+import { attachmentsDir, sessionsDir } from "./paths.ts";
+
+/** 解码后的图片附件（data URL → 文件）。 */
+export interface ImageFile {
+  filename: string;
+  mime: string;
+  bytes: Buffer;
+}
+
+const IMAGE_EXT: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+};
+
+/**
+ * data URL → 落盘文件名（内容哈希命名）。
+ *
+ * 为什么用哈希而不是 `img-<partIndex>`：part index 每个用户消息都从 0/1 开始，
+ * 多轮发图会互相覆盖（v0.0.1 的坑）。内容哈希天然去重且不撞名。
+ */
+export function decodeImageDataUrl(url: string): ImageFile | null {
+  const m = /^data:(image\/[a-z+.-]+);base64,(.+)$/i.exec(url);
+  if (!m) return null;
+  const mime = (m[1] ?? "image/png").toLowerCase();
+  const b64 = m[2] ?? "";
+  const bytes = Buffer.from(b64, "base64");
+  const ext = IMAGE_EXT[mime] ?? "png";
+  const hash = createHash("sha256").update(b64).digest("hex").slice(0, 16);
+  return { filename: `img-${hash}.${ext}`, mime, bytes };
+}
+
+/** 把一张 data URL 图片写到 `<sessions>/attachments/<id>/`，返回相对 ref（不含 sessions 前缀）。 */
+export function writeImageAttachment(sessionId: string, file: ImageFile): string {
+  const dir = attachmentsDir(sessionId);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const abs = join(dir, file.filename);
+  if (!existsSync(abs)) writeFileSync(abs, file.bytes, { mode: 0o600 });
+  return `attachments/${sessionId}/${file.filename}`;
+}
 
 export interface SessionMeta {
   id: string;
@@ -27,13 +67,6 @@ export interface SessionFile {
   version: 1;
   meta: SessionMeta;
   messages: Message[];
-}
-
-function sessionsDir(): string {
-  // 测试注入点（与 NEO_MEMORY_DIR 同一惯例）：CI/测试不得读写用户真实会话。
-  const env = process.env["NEO_SESSIONS_DIR"];
-  if (env) return env;
-  return join(homedir(), ".neo", "sessions");
 }
 
 function ensureDir(): string {
@@ -140,21 +173,21 @@ export function applyRestored(system: Message | undefined, restored: Message[]):
 export function saveSession(messages: Message[], meta: SessionMeta): void {
   ensureDir();
   meta.updatedAt = new Date().toISOString();
-  // M2 粘贴增强（PRD §5.6）：图片 data URL 不进会话 JSON（一张截图 1~3MB base64），
-  // 落盘到 attachments/<sessionId>/，JSON 里存 $ref 指针；恢复时读文件重组。
-  const attachmentsDir = join(sessionsDir(), "attachments", meta.id);
+  // 图片 data URL 不进会话 JSON（一张截图 1~3MB base64），落盘到
+  // attachments/<sessionId>/，JSON 里存 $ref 指针；恢复时按 mime 重组。
+  // v0.0.2：支持 png/jpeg/webp（扩展名与 mime 一起记，hydrate 才不会把 jpeg 标成 png）。
+  const dir = attachmentsDir(meta.id);
   if (messages.some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"))) {
-    if (!existsSync(attachmentsDir)) mkdirSync(attachmentsDir, { recursive: true });
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   const serialized = messages.map((m) => {
     if (!Array.isArray(m.content)) return m;
-    const parts: (ContentPart | { type: "image_ref"; ref: string })[] = m.content.map((p, i) => {
+    const parts: (ContentPart | { type: "image_ref"; ref: string; mime: string })[] = m.content.map((p) => {
       if (p.type !== "image_url") return p;
-      const m2 = /^data:image\/png;base64,(.+)$/.exec(p.image_url.url);
-      if (!m2) return p; // 非 data URL（自定义 URL）原样保留
-      const name = `img-${i}.png`;
-      writeFileSync(join(attachmentsDir, name), Buffer.from(m2[1] ?? "", "base64"));
-      return { type: "image_ref", ref: `attachments/${meta.id}/${name}` };
+      const file = decodeImageDataUrl(p.image_url.url);
+      if (!file) return p; // 非 data URL（自定义 URL）原样保留
+      const ref = writeImageAttachment(meta.id, file);
+      return { type: "image_ref", ref, mime: file.mime };
     });
     return { ...m, content: parts };
   });
@@ -162,7 +195,7 @@ export function saveSession(messages: Message[], meta: SessionMeta): void {
   writeFileSync(meta.path, JSON.stringify(data, null, 2), "utf8");
 }
 
-/** 恢复时把 $ref 重组回 data URL；附件文件缺失 → text part「[Image #N 已丢失]」，不阻塞（PRD §5.6）。 */
+/** 恢复时把 $ref 重组回 data URL；附件文件缺失 → text part「[Image #N 已丢失]」，不阻塞。 */
 export function hydrateMessages(messages: Message[]): Message[] {
   const dir = sessionsDir();
   let imgSeq = 0;
@@ -176,16 +209,32 @@ export function hydrateMessages(messages: Message[]): Message[] {
         imgSeq += 1;
         return { type: "text", text: `[Image #${imgSeq} 已丢失]` };
       }
+      const mime = (p as { mime?: string }).mime ?? mimeForRef(ref);
       const b64 = readFileSync(file).toString("base64");
-      return { type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } };
+      return { type: "image_url", image_url: { url: `data:${mime};base64,${b64}` } };
     });
     return { ...m, content: parts };
   });
 }
 
+/** 老会话（无 mime 字段）按扩展名推断；未知扩展名回落 png（v0.0.1 行为）。 */
+function mimeForRef(ref: string): string {
+  const ext = ref.slice(ref.lastIndexOf(".") + 1).toLowerCase();
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "webp") return "image/webp";
+  return "image/png";
+}
+
+
 /** 持久化前确保附件目录存在（saveSession 内部调用）。 */
 export function ensureAttachmentsDir(sessionId: string): string {
-  const d = join(sessionsDir(), "attachments", sessionId);
-  if (!existsSync(d)) mkdirSync(d, { recursive: true });
+  const d = attachmentsDir(sessionId);
+  if (!existsSync(d)) mkdirSync(d, { recursive: true, mode: 0o700 });
   return d;
 }
+
+/** 附件绝对路径（host 发图时与 saveSession 用同一套布局）。 */
+export function attachmentPath(sessionId: string, filename: string): string {
+  return join(attachmentsDir(sessionId), filename);
+}
+

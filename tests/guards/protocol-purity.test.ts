@@ -28,7 +28,7 @@ describe("protocol 纯净性", () => {
     }
   });
 
-  test("v1.1 语义版本已冻结", () => {
-    expect(PROTOCOL_SEMVER).toBe("1.1");
+  test("v1.2 语义版本已冻结", () => {
+    expect(PROTOCOL_SEMVER).toBe("1.2");
   });
 });

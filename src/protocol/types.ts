@@ -9,19 +9,18 @@
 
 export const PROTOCOL_VERSION = 1 as const;
 /** 语义版本（v1 内仅增量；用于 ready/lock/握手） */
-export const PROTOCOL_SEMVER = "1.1" as const;
+export const PROTOCOL_SEMVER = "1.2" as const;
 /** v1.1 能力位（客户端按能力降级） */
 export const CAPABILITIES: readonly string[] = [
-  "approval.diff.optional",
-  "question.multi",
   "turn.aborted",
   "command.structured",
-  "snapshot.live",
-  "transcript.replay",
   "mode.set",
-  "peers",
-  "usage.extended",
+  "snapshot.live",
   "activity",
+  "question.multi",
+  "transcript.replay",
+  "attachments.image",
+  "sessions",
 ];
 
 /* ------------------------------------------------------------------ */
@@ -612,6 +611,8 @@ export interface SessionListCommand {
 export interface SessionCreateCommand {
   type: "session.create";
   title?: string;
+  /** v0.0.2 Hub：新会话工作目录 */
+  cwd?: string;
 }
 
 export interface SessionAttachCommand {
@@ -619,6 +620,8 @@ export interface SessionAttachCommand {
   sessionId?: string;
   /** 已收到的最大 seq；缺省表示要完整快照 */
   lastSeq?: number;
+  /** v0.0.2：transcript 世代 */
+  epoch?: string;
 }
 
 export interface SessionDetachCommand {
@@ -637,6 +640,13 @@ export interface SessionCloseCommand {
   sessionId?: string;
 }
 
+export interface ImageAttachmentInput {
+  kind: "image";
+  mime: "image/png" | "image/jpeg" | "image/webp";
+  /** base64（不含 data: 前缀） */
+  dataBase64: string;
+}
+
 export interface TurnSendCommand {
   type: "turn.send";
   sessionId?: string;
@@ -644,6 +654,8 @@ export interface TurnSendCommand {
   /** 幂等键；重连后 hub 用它识别重复投递 */
   clientId: string;
   refs?: { icon: string; label: string }[];
+  /** v0.0.2 图片附件；≤5 张 / 单张 ≤5MB / png|jpeg|webp */
+  attachments?: ImageAttachmentInput[];
 }
 
 export interface TurnAbortCommand {
@@ -704,6 +716,13 @@ export interface ModeSetCommand {
   mode: PermissionMode;
 }
 
+export interface TranscriptFetchCommand {
+  type: "transcript.fetch";
+  sessionId?: string;
+  fromSeq?: number;
+  limit?: number;
+}
+
 export type ClientCommand =
   | LoginCommand
   | LogoutCommand
@@ -722,6 +741,7 @@ export type ClientCommand =
   | SettingsGetCommand
   | SettingsPatchCommand
   | ModeSetCommand
+  | TranscriptFetchCommand
   | UsageSummaryCommand
   | PingCommand;
 
@@ -817,6 +837,7 @@ export type HubErrorCode =
   | "session_gone"
   | "slow_consumer"
   | "unsupported"
+  | "too_large"
   | "protocol"
   | "internal";
 

@@ -1,11 +1,11 @@
 /**
  * tests/unit/sequence.test.ts — seq/epoch 不变量 + 协议帧契约（在真实 stdio 进程上取证）。
  *
- * 断言（协议 v1.1 §3 / §5）：
+ * 断言（协议 v1.2 §3 / §5）：
  *  - 每一帧都能被 protocol/guards.decodeServerMessage 接受（宽进严出的边界契约）。
  *  - durable 事件 seq 严格 +1；ephemeral 事件 seq = 当前最高 durable seq（不推进）。
  *  - 事件信封 sessionId、snapshot.epoch 与 ready 一致。
- *  - assistant.end.text 是权威全文 = delta 累积（v1.1 §5.1）。
+ *  - assistant.end.text 是权威全文 = delta 累积（v1.2 §5.1）。
  *
  * 用 stdio 子进程而非直连 Host：seq/epoch 是「跨进程 + 持久化」的契约，
  * 只有真实进程边界才能证明 host 没把 seq 分配漏到 serve 层。

@@ -22,6 +22,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { createPathPolicy, PathDeniedError, type PathPolicy } from "./path.ts";
 
 const MANIFEST = "manifest.jsonl";
 const DEFAULT_MAX_ENTRIES = 100;
@@ -78,6 +79,8 @@ export class CheckpointStore implements CheckpointSink {
   private readonly realCwd: string;
   private readonly maxEntries: number;
   private nextSeq: number | null = null;
+  /** undo 写入前再过一次边界检查（manifest 可能被手工改过/来自旧版本）。 */
+  private readonly policy: PathPolicy;
 
   constructor(opts: CheckpointOptions) {
     this.cwd = resolve(opts.cwd);
@@ -88,6 +91,7 @@ export class CheckpointStore implements CheckpointSink {
     }
     this.dir = opts.dir ?? join(opts.cwd, ".neo", "backups", opts.sessionId);
     this.maxEntries = Math.max(1, opts.maxEntries ?? DEFAULT_MAX_ENTRIES);
+    this.policy = createPathPolicy(this.realCwd);
   }
 
   /**
@@ -178,6 +182,16 @@ export class CheckpointStore implements CheckpointSink {
 
     for (const entry of targets) {
       try {
+        // 边界检查：manifest 里的 path 不可信（可被手改/来自旧版本）。
+        try {
+          this.policy.resolveWrite(entry.path);
+        } catch (e) {
+          if (e instanceof PathDeniedError) {
+            results.push({ entry, restored: "skipped", reason: `路径不在工作目录内：${e.message}` });
+            continue;
+          }
+          throw e;
+        }
         if (!entry.existed) {
           rmSync(entry.path, { force: true });
           results.push({ entry, restored: "deleted" });
