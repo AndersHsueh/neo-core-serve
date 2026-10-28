@@ -9,7 +9,7 @@
 
 ## 当前状态
 
-**C0 完成（协议 v1.1 冻结 + reducer + 骨架 + docs:check）；C0b 待开工。**
+**v0.0.1 已发布**（tag `v0.0.1`，commit `2e7257e`）：单会话 Matrix-Core（WS/stdio），48 tests / 0 fail，verify ALL GREEN。下一阶段：v0.0.2（PathPolicy、Hub、命令/协议补齐）。
 基线：neo **1052 pass / 0 fail / 67 文件** + PTY 21/21（2026-10-28 实跑/evidence；`tests/README.md` 的 1051/1 是旧口径）。
 事实源：`docs/matrix-core-v0-prd.md`、`architecture.md`、`protocol-v1.md`、`work-plan.md`、`decisions.md`、`protocol-freeze.md`。
 
@@ -28,6 +28,12 @@
 |---|---|---|---|
 | 计划 | [[计划-Matrix-Core-v0]] | C0 3d → C0b 4d → C1 15d → C2 16d → C3 9d；v0 共 47d；C4 Hub 15d；C5 另立 | 2026-10-28 |
 | 决策 | [[决策记录-Matrix-Core]] | D1 仓库独立 / D2 移植 / D3 协议源 / D4 事件化 / D5 单会话→Hub / D6 持久化 seq/epoch / D7 审批 deadline / D8 命令层 / D9 鉴权 / D10 版本 / D11 neo 冻结 / D12 文档 wiki / D13 PathPolicy / D14 脱敏 / D15 共存迁移 | 2026-10-28 |
+
+### 发布
+
+| 主题 | 页面 | 一句话摘要 | 元数据 |
+|---|---|---|---|
+| v0.0.1 | [[发布-v0.0.1]] | 首个可独立运行单会话 core：WS/stdio、48 tests、协议 v1.1 冻结、锁/恢复/审批/命令子集 | tag `v0.0.1` |
 
 ### 迁移与开放问题
 

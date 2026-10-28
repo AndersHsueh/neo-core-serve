@@ -15,3 +15,6 @@
 ## [2026-10-28] deliverable | 最终设计 v0.3.1：协议 v1.1（seq=durable、auth 面保留、error at/blockId、ping liveness）、计划 C0 3d/C0b 4d/C1 15d/C2 16d/C3 9d、D1–D15
 ## [2026-10-28] milestone | C0 完成：协议 v1.1 冻结（6 文件 lock）、reducer 从 GUI 抽取并去非确定性、工程骨架 + docs:check + deps:scan、13 个契约测试、verify ALL GREEN；基线证据落 docs/evidence/
 ## [2026-10-28] todo | C0b 开工：按 deps-scan 清单只搬纯模块与测试；agent/tools/system-prompt 留到 C1（传递依赖 ui）
+## [2026-10-28] milestone | v0.0.1 发布：单会话 Matrix-Core（WS/stdio + 协议 v1.1 + 48 tests + verify ALL GREEN），commit 2e7257e / tag v0.0.1
+## [2026-10-28] deliverable | simplify（reuse/quality/efficiency 三路 reviewer）修复 M1–M5 与 minors；PathPolicy/WS 背压/Hub 等列 v0.0.2
+## [2026-10-28] wiki | 新建 [[发布-v0.0.1]]，INDEX/计划页同步发布状态
