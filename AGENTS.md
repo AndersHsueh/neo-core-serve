@@ -14,7 +14,7 @@
 
 - `neo`：**1052 pass / 0 fail / 67 文件** + PTY 21/21（evidence）。
 - 本仓 v0.0.1（已发布）：**48 pass / 0 fail / 12 文件**（unit+guards 23 / e2e 25）。
-- 本仓 v0.0.2：**92 pass / 0 fail / 22 文件 / 1225 expect**（unit+guards 39 / e2e 53：stdio、WS、WS 合批、锁、allow-session、question、degraded、resilience、path-policy、attachments、transcript-fetch、commands-consistency、hub）；tsc 0 error；`docs:check OK`（31 md / 7 协议 / commands.json 一致）；`verify.sh` ALL GREEN；证据 `docs/evidence/v0.0.2-{tsc,unit,e2e,docs}.txt`。
+- 本仓 v0.0.2：**92 pass / 0 fail / 22 文件**（unit+guards 39 / e2e 53：stdio、WS、WS 合批、锁、allow-session、question、degraded、resilience、path-policy、attachments、transcript-fetch、commands-consistency、hub）；tsc 0 error；`docs:check OK`（31 md / 7 协议 / commands.json 一致）；`verify.sh` ALL GREEN；证据 `docs/evidence/v0.0.2-{tsc,unit,e2e,docs}.txt`。
 
 ## 结构
 

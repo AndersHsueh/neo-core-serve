@@ -2,87 +2,87 @@
 bun test v1.3.13 (bf2e2cec)
 
 tests/e2e/settings-fallback.test.ts:
-(pass) ~/.neo/settings.json 回落 > stdio：cwd 无 settings.json，用户级 ~/.neo/settings.json 生效（ready + settings.get 掩码） [97.03ms]
-(pass) ~/.neo/settings.json 回落 > hub：worker 继承临时 HOME，cwd 无 settings.json 也能 create/attach/turn [176.66ms]
+(pass) ~/.neo/settings.json 回落 > stdio：cwd 无 settings.json，用户级 ~/.neo/settings.json 生效（ready + settings.get 掩码） [95.97ms]
+(pass) ~/.neo/settings.json 回落 > hub：worker 继承临时 HOME，cwd 无 settings.json 也能 create/attach/turn [171.99ms]
 
 tests/e2e/attachments.test.ts:
-(pass) 图片附件 > PNG 全链路：fake LLM 收到 image_url → 附件落盘 → 会话 $ref → resume 后 hydrate [133.38ms]
-(pass) 图片附件 > 超 5 张被拒 [50.30ms]
-(pass) 图片附件 > 单张 >5MB 被拒 [79.32ms]
-(pass) 图片附件 > 非图片 mime 被拒（image/gif 不在白名单） [50.55ms]
+(pass) 图片附件 > PNG 全链路：fake LLM 收到 image_url → 附件落盘 → 会话 $ref → resume 后 hydrate [124.76ms]
+(pass) 图片附件 > 超 5 张被拒 [48.15ms]
+(pass) 图片附件 > 单张 >5MB 被拒 [73.72ms]
+(pass) 图片附件 > 非图片 mime 被拒（image/gif 不在白名单） [48.53ms]
 
 tests/e2e/allow-session.test.ts:
-(pass) allow-session > write_file allow-session 后同工具免审批；shell 仍要求审批 [138.99ms]
+(pass) allow-session > write_file allow-session 后同工具免审批；shell 仍要求审批 [133.32ms]
 
 tests/e2e/path-policy.test.ts:
-(pass) PathPolicy 工具层 > 越界读 /etc/passwd：工具可见拒绝（tool.end=error），轮继续 [112.77ms]
-(pass) PathPolicy 工具层 > 越界写 ../../escaped.txt：工具可见拒绝且文件未落盘 [114.50ms]
+(pass) PathPolicy 工具层 > 越界读 /etc/passwd：工具可见拒绝（tool.end=error），轮继续 [107.56ms]
+(pass) PathPolicy 工具层 > 越界写 ../../escaped.txt：工具可见拒绝且文件未落盘 [108.58ms]
 
 tests/e2e/commands-consistency.test.ts:
-(pass) 命令单表一致性 > commands.json 结构合法：name/alias 全局唯一、字段齐全 [0.32ms]
-(pass) 命令单表一致性 > HELP 文本与目录一致（双向包含，含别名） [49.47ms]
-(pass) 命令单表一致性 > 未知命令错误文案的「可用」列表 = 目录（name + aliases） [50.23ms]
-(pass) 命令单表一致性 > 目录里的每条命令都被路由（不会返回「不支持的命令」） [55.37ms]
+(pass) 命令单表一致性 > commands.json 结构合法：name/alias 全局唯一、字段齐全 [0.26ms]
+(pass) 命令单表一致性 > HELP 文本与目录一致（双向包含，含别名） [50.43ms]
+(pass) 命令单表一致性 > 未知命令错误文案的「可用」列表 = 目录（name + aliases） [47.69ms]
+(pass) 命令单表一致性 > 目录里的每条命令都被路由（不会返回「不支持的命令」） [53.37ms]
 
 tests/e2e/lock.test.ts:
-(pass) 单写者锁 > 第二个进程 --resume 同一会话 → 退出 2；第一个进程仍可 attach；释放后可重开 [164.56ms]
+(pass) 单写者锁 > 第二个进程 --resume 同一会话 → 退出 2；第一个进程仍可 attach；释放后可重开 [157.20ms]
 
 tests/e2e/resume-degraded.test.ts:
-(pass) 旧会话 degraded 恢复 > 无 transcript 的旧会话 --resume：ready 正常、blocks 有损重建、可继续新轮 [98.22ms]
+(pass) 旧会话 degraded 恢复 > 无 transcript 的旧会话 --resume：ready 正常、blocks 有损重建、可继续新轮 [95.37ms]
 
 tests/e2e/transcript-fetch.test.ts:
-(pass) transcript.fetch > 分页：fromSeq/limit 不重不漏、seq 升序、nextSeq 可续读 [98.64ms]
-(pass) transcript.fetch > 事件形状：每个 entry 带 seq + event；durable 事件不回放 ephemeral [95.99ms]
-(pass) transcript.fetch > 未知 sessionId → 明确错误（不是空列表） [97.93ms]
-(pass) transcript.fetch > attach 与 fetch 同源：snapshot.seq = fetch 最高 seq，事件回放结果 = snapshot.blocks [99.84ms]
+(pass) transcript.fetch > 分页：fromSeq/limit 不重不漏、seq 升序、nextSeq 可续读 [97.59ms]
+(pass) transcript.fetch > 事件形状：每个 entry 带 seq + event；durable 事件不回放 ephemeral [96.99ms]
+(pass) transcript.fetch > 未知 sessionId → 明确错误（不是空列表） [97.35ms]
+(pass) transcript.fetch > attach 与 fetch 同源：snapshot.seq = fetch 最高 seq，事件回放结果 = snapshot.blocks [98.87ms]
 
 tests/e2e/stdio.test.ts:
-(pass) stdio e2e > ready：首帧含 user/coreVersion/protocolVersion/capabilities/sessionId/epoch；stdout 只有帧 [47.50ms]
-(pass) stdio e2e > session.list + session.attach：meta 形状与 snapshot 一致 [51.58ms]
-(pass) stdio e2e > ping → pong（协议 v1.2：只回 pong 帧，不带 result） [49.57ms]
-(pass) stdio e2e > turn.send 完整轮：reasoning/assistant/tool/stats 齐全，usage 非零 [99.31ms]
-(pass) stdio e2e > 审批 allow：write_file 允许后工具执行、文件落盘、轮正常收口 [95.10ms]
-(pass) stdio e2e > 审批 deny：拒绝后 tool.end=denied、轮继续（stats 收口） [93.01ms]
-(pass) stdio e2e > 审批 timeout：MATRIX_CORE_APPROVAL_TIMEOUT_MS 生效，by=timeout、轮继续、会话不卡死 [393.92ms]
-(pass) stdio e2e > question 单选：question.request → 回答 key → question.resolve → 轮继续 [92.72ms]
-(pass) stdio e2e > question timeout：无人回答时 question.resolve by=timeout、轮继续 [603.01ms]
-(pass) stdio e2e > turn.abort：turn.aborted 终止轮，且不再发 stats / 会话回到 idle [889.75ms]
-(pass) stdio e2e > command.run clear → session.cleared，快照视图清空但 meta 保留 [113.05ms]
-(pass) stdio e2e > --resume：同 sessionId/epoch，snapshot 恢复上一轮消息，下一轮上下文可继续 [178.71ms]
-(pass) stdio e2e > transcript 尾部修复：坏尾行丢弃 + 半轮 turn.start 补 turn.aborted{crash}，可 attach [135.19ms]
+(pass) stdio e2e > ready：首帧含 user/coreVersion/protocolVersion/capabilities/sessionId/epoch；stdout 只有帧 [49.44ms]
+(pass) stdio e2e > session.list + session.attach：meta 形状与 snapshot 一致 [50.54ms]
+(pass) stdio e2e > ping → pong（协议 v1.2：只回 pong 帧，不带 result） [49.41ms]
+(pass) stdio e2e > turn.send 完整轮：reasoning/assistant/tool/stats 齐全，usage 非零 [96.75ms]
+(pass) stdio e2e > 审批 allow：write_file 允许后工具执行、文件落盘、轮正常收口 [92.83ms]
+(pass) stdio e2e > 审批 deny：拒绝后 tool.end=denied、轮继续（stats 收口） [93.46ms]
+(pass) stdio e2e > 审批 timeout：MATRIX_CORE_APPROVAL_TIMEOUT_MS 生效，by=timeout、轮继续、会话不卡死 [413.58ms]
+(pass) stdio e2e > question 单选：question.request → 回答 key → question.resolve → 轮继续 [112.38ms]
+(pass) stdio e2e > question timeout：无人回答时 question.resolve by=timeout、轮继续 [604.24ms]
+(pass) stdio e2e > turn.abort：turn.aborted 终止轮，且不再发 stats / 会话回到 idle [893.04ms]
+(pass) stdio e2e > command.run clear → session.cleared，快照视图清空但 meta 保留 [120.92ms]
+(pass) stdio e2e > --resume：同 sessionId/epoch，snapshot 恢复上一轮消息，下一轮上下文可继续 [197.15ms]
+(pass) stdio e2e > transcript 尾部修复：坏尾行丢弃 + 半轮 turn.start 补 turn.aborted{crash}，可 attach [137.24ms]
 
 tests/e2e/question.test.ts:
-(pass) 提问：多选 / 自定义 > 多选：question.request.multiSelect=true，keys[] 回答后 resolve 带 keys/answerLabel [89.91ms]
-(pass) 提问：多选 / 自定义 > 自定义回答：question.answer.custom → resolve.custom（不传 key 也能收口） [92.65ms]
+(pass) 提问：多选 / 自定义 > 多选：question.request.multiSelect=true，keys[] 回答后 resolve 带 keys/answerLabel [89.36ms]
+(pass) 提问：多选 / 自定义 > 自定义回答：question.answer.custom → resolve.custom（不传 key 也能收口） [90.05ms]
 
 tests/e2e/ws-batching.test.ts:
-(pass) WS 合批 > 高频 delta：WS 帧数 < delta 数且文本完整；durable 事件不丢 [438.75ms]
-(pass) WS 合批 > 对照：stdio 不合批（逐 delta 转发），证明合批是 WS 传输层行为 [412.60ms]
+(pass) WS 合批 > 高频 delta：WS 帧数 < delta 数且文本完整；durable 事件不丢 [447.46ms]
+(pass) WS 合批 > 对照：stdio 不合批（逐 delta 转发），证明合批是 WS 传输层行为 [447.18ms]
 
 tests/e2e/ws.test.ts:
-(pass) WS e2e > 握手：core.json 发现 → 子协议鉴权 ready；坏 token 401；/health 无敏感信息 [224.44ms]
-(pass) WS e2e > ping→pong、attach→snapshot、turn.send 完整轮（stats；事件体内无 seq） [121.71ms]
-(pass) WS e2e > 重连 attach{lastSeq,epoch} 不崩并返回 snapshot；SIGTERM 干净收尾 [272.75ms]
-(pass) WS e2e > 超长帧（>8MB）：result ok:false code too_large 且 id 与请求一致；连接不被打断 [80.58ms]
+(pass) WS e2e > 握手：core.json 发现 → 子协议鉴权 ready；坏 token 401；/health 无敏感信息 [241.10ms]
+(pass) WS e2e > ping→pong、attach→snapshot、turn.send 完整轮（stats；事件体内无 seq） [136.24ms]
+(pass) WS e2e > 重连 attach{lastSeq,epoch} 不崩并返回 snapshot；SIGTERM 干净收尾 [278.51ms]
+(pass) WS e2e > 超长帧（>8MB）：result ok:false code too_large 且 id 与请求一致；连接不被打断 [93.47ms]
 
 tests/e2e/resilience.test.ts:
-(pass) 中断/恢复可靠性 > SIGTERM mid-turn（stdio）：退出 0 + turn.aborted{shutdown} + 锁释放可 resume [101.87ms]
-(pass) 中断/恢复可靠性 > SIGTERM mid-turn（WS）：客户端收到 turn.aborted{shutdown}、退出 0、core.json 清理、锁释放 [299.73ms]
-(pass) 中断/恢复可靠性 > resume 幂等：attach 不丢 transcript 事件、尾行不破坏、终态唯一 [136.90ms]
-(pass) 中断/恢复可靠性 > 轮中 command.run clear → conflict：不清空上下文，轮继续正常收口 [1644.54ms]
+(pass) 中断/恢复可靠性 > SIGTERM mid-turn（stdio）：退出 0 + turn.aborted{shutdown} + 锁释放可 resume [94.27ms]
+(pass) 中断/恢复可靠性 > SIGTERM mid-turn（WS）：客户端收到 turn.aborted{shutdown}、退出 0、core.json 清理、锁释放 [300.71ms]
+(pass) 中断/恢复可靠性 > resume 幂等：attach 不丢 transcript 事件、尾行不破坏、终态唯一 [134.55ms]
+(pass) 中断/恢复可靠性 > 轮中 command.run clear → conflict：不清空上下文，轮继续正常收口 [1653.85ms]
 
 tests/e2e/hub.test.ts:
-(pass) Hub 多会话 > 发现/ready/health：caps 含 sessions、/health 报 hub 形态 [83.47ms]
-(pass) Hub 多会话 > session.create → list 可见 → attach 拿 snapshot → 完整轮 [187.41ms]
-(pass) Hub 多会话 > 两个 session 并行 turn：事件 sessionId 各自正确、互不串流 [224.97ms]
-(pass) Hub 多会话 > 第二客户端 attach 同一 session → conflict；未 attach 的会话命令 → conflict [124.09ms]
-(pass) Hub 多会话 > session.close 终止 worker（health.sessions 归零），之后可重新 attach（worker 重启） [228.40ms]
-(pass) Hub 多会话 > Hub 下 transcript.fetch 可用（按 fromSeq/limit；能力位门控） [174.17ms]
-(pass) Hub 多会话 > Hub 下图片附件可用（能力位门控） [164.78ms]
-(pass) Hub 多会话 > 并发 attach 同 session：恰好 1 成功 1 conflict；owner 断开后可再次 attach（owner 不悬空） [126.88ms]
-(pass) Hub 多会话 > Hub cwd：create{cwd:A} → close → attach（Hub defaultCwd=B）后仍以 A 为 cwd [276.79ms]
+(pass) Hub 多会话 > 发现/ready/health：caps 含 sessions、/health 报 hub 形态 [71.62ms]
+(pass) Hub 多会话 > session.create → list 可见 → attach 拿 snapshot → 完整轮 [172.87ms]
+(pass) Hub 多会话 > 两个 session 并行 turn：事件 sessionId 各自正确、互不串流 [224.68ms]
+(pass) Hub 多会话 > 第二客户端 attach 同一 session → conflict；未 attach 的会话命令 → conflict [122.69ms]
+(pass) Hub 多会话 > session.close 终止 worker（health.sessions 归零），之后可重新 attach（worker 重启） [228.81ms]
+(pass) Hub 多会话 > Hub 下 transcript.fetch 可用（按 fromSeq/limit；能力位门控） [173.29ms]
+(pass) Hub 多会话 > Hub 下图片附件可用（能力位门控） [161.92ms]
+(pass) Hub 多会话 > 并发 attach 同 session：恰好 1 成功 1 conflict；owner 断开后可再次 attach（owner 不悬空） [125.17ms]
+(pass) Hub 多会话 > Hub cwd：create{cwd:A} → close → attach（Hub defaultCwd=B）后仍以 A 为 cwd [275.04ms]
 
  53 pass
  0 fail
  846 expect() calls
-Ran 53 tests across 14 files. [10.37s]
+Ran 53 tests across 14 files. [10.44s]
