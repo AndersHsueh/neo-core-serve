@@ -115,3 +115,13 @@ a832b2433427faad9e96d187b9077d27aa2eca125d6ace7f73ded25cc0a536d7  gui/src/protoc
 ## 6. 许可与归属
 
 私有仓库；代码来自用户自有项目 `neo`，无第三方许可冲突。运行时仅依赖 Bun（无外部运行库）。
+
+---
+
+## 7. C0 执行记录（2026-10-28）
+
+- 协议文件已复制并升级到 v1.1：`src/protocol/{types,guards,fixtures,reducer,commands,index}.ts`。
+- reducer 由 `neo-agent-app/gui/src/state/session.ts` 的 `applyEvent` 提取，去掉 `Date.now()`：错误块用事件的 `blockId/at`，问题回答用 `event.at`；新增 v1.1 事件分支。
+- `protocol.lock.json` 已生成（5 文件 sha256 + 来源 commit）；`docs:check` 校验哈希。
+- 传递依赖扫描证据：`docs/evidence/neo-deps.txt`（11 个模块闭包依赖 ui，含 agent/tools/system-prompt）。
+- 基线证据：`docs/evidence/baseline.txt`（neo 1052/0/67 + PTY 21/21 evidence）。

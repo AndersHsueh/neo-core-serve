@@ -1,0 +1,15 @@
+{
+  "protocolVersion": "1.1",
+  "wireVersion": 1,
+  "sourceRepo": "neo-agent-app/gui/src/protocol",
+  "sourceCommit": "a52f1f02d034ddfda14e9440ea1764eeea790d10",
+  "frozenAt": "2026-10-28",
+  "files": {
+    "src/protocol/types.ts": "dfe9d33572bce7f62c3421fa96d74b0cc3f569a17024b451201d481b5dfc207d",
+    "src/protocol/guards.ts": "b0cecc4c4eed7f3c9b6b2fb2e7596ea521de762c8ab87d774d5820988c512337",
+    "src/protocol/fixtures.ts": "403d7c42d530dcdd06d6aff7d1bcfea4157184cdb6121cf2eacce882455267b6",
+    "src/protocol/reducer.ts": "6ee27df51ebcb05dd7bd3820d60a9b62ad9b397a54e7d0523f2555e917b244f8",
+    "src/protocol/commands.ts": "745d083f904fd8c8952236cc585240468a63b0c9fb1839cd09d86a97f0ef7748",
+    "src/protocol/index.ts": "3008cbebd0654d0593081ef9ca9940b4a69512f296b20759a11205be02a75774"
+  }
+}

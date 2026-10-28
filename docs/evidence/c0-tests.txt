@@ -1,0 +1,24 @@
+──── tests ────
+bun test v1.3.13 (bf2e2cec)
+
+tests/unit/protocol.test.ts:
+(pass) 信封与事件 fixtures > 每条信封 fixture 都能被 decodeServerMessage 接受 [0.34ms]
+(pass) 信封与事件 fixtures > 坏样本必须被拒绝 [0.06ms]
+(pass) 信封与事件 fixtures > 未知事件类型放行（客户端能力降级，不得断连） [0.01ms]
+(pass) 信封与事件 fixtures > snapshot 缺 epoch 必须拒绝 [0.02ms]
+(pass) 信封与事件 fixtures > 未知命令拒绝；mode.set 接受 [0.04ms]
+(pass) 信封与事件 fixtures > 协议版本与能力位 [0.06ms]
+(pass) reducer > 同一事件序列 → 同一状态（确定性） [0.38ms]
+(pass) reducer > 视图块覆盖主要类型 [0.09ms]
+(pass) reducer > session.cleared 清空视图但保留 meta [0.03ms]
+(pass) reducer > hydrate 从 snapshot.live 恢复 streaming 指针 [0.10ms]
+
+tests/guards/protocol-purity.test.ts:
+(pass) protocol 纯净性 > 只允许内部相对 import [0.54ms]
+(pass) protocol 纯净性 > 禁止非确定性调用与平台 API [0.29ms]
+(pass) protocol 纯净性 > v1.1 语义版本已冻结 [0.01ms]
+
+ 13 pass
+ 0 fail
+ 101 expect() calls
+Ran 13 tests across 2 files. [12.00ms]

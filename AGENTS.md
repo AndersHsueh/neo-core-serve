@@ -6,13 +6,13 @@
 
 - 工作目录：`/Users/xueyuheng/research/000-alice-new/neo-core-serve`
 - 定位：neo 的核心运行时服务（Agent / 工具 / 会话 / 记忆 / 信箱 / 命令），独立进程、无终端依赖。
-- 状态：**设计完成（v0.3 评审后），C0 未开工**。
+- 状态：**C0 完成（协议冻结 + reducer + 骨架 + docs:check）；C0b 待开工**。
 - 上游：`neo` v0.4.3（源提交 `1da7c6f`，冻结中）、`neo-agent-app`（协议原型 `a52f1f0` + GUI）。
 
 ## 基线（2026-10-28 实跑）
 
 - `neo`：**1052 pass / 0 fail / 67 文件** + PTY 21/21（evidence）。`neo/tests/README.md` 的「1051/1」是旧口径。
-- 本仓：无代码；协议/文档已冻结（protocol v1.1 / PRD v0.3 / architecture v0.3 / work-plan v0.3）。
+- 本仓：协议 v1.1 已冻结（6 文件 lock），13 个协议测试；`verify.sh` ALL GREEN（tsc/tests/docs）。
 
 ## 结构
 
@@ -60,10 +60,10 @@ tests/ scripts/       单元/契约/集成/混沌/守卫；fake-llm/probe/verify
 
 - 文档：PRD v0.3 / 架构 v0.3 / 协议 v1.1 / 计划 v0.3 / 决策 D1–D15 / provenance / ops / GUI 接入。
 - 代码：未开始。
-- 下一步：C0（协议冻结 + 骨架，3d）→ C0b（纯核心移植，4d）→ C1（端口/事件化，15d）。
+- 下一步：C0b（纯核心移植，4d）→ C1（端口/事件化，15d）→ C2（协议服务，16d）。
 
 ## 下一步候选
 
-1. 跑 `docs:check` 最小版（协议 lock/命令目录/链接）。
+1. C0b：传递依赖扫描（`bun run deps:scan`）→ 只搬纯模块与测试。
 2. 与 GUI 约定 dev 登录与 endpoint。
-3. 建立 baseline evidence 并开工 C0。
+3. C1 前拆 `toolNames` 纯常量，解除 system-prompt 的传递 UI 依赖。

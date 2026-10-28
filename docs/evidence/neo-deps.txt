@@ -1,0 +1,26 @@
+root: /Users/xueyuheng/research/000-alice-new/neo/src
+direct ui/tui/input imports (9):
+  agent.ts
+  index.ts
+  tools/askUser.ts
+  tools/types.ts
+  tui/ansi.ts
+  tui/buffer.ts
+  tui/composer.ts
+  tui/frame.ts
+  tui/status.ts
+
+modules whose transitive closure reaches ui/tui/input (11):
+  agent.ts
+  index.ts
+  system-prompt.ts
+  tools/askUser.ts
+  tools/index.ts
+  tools/mailbox.ts
+  tools/memory.ts
+  tools/task.ts
+  tools/types.ts
+  tools/webSearch.ts
+  tools/wiki.ts
+
+entry-like: agent.ts, index.ts

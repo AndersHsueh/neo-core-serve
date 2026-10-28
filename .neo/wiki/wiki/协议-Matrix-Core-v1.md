@@ -4,7 +4,7 @@
 
 ## 摘要
 
-客户端与 core 的唯一契约是 WS 协议 v1.1：JSON 信封 + seq/epoch + attach 续传 + 快照，**冻结 v1 的判别名**（`turn.start`、`assistant.start/delta/end`、`tool.start/end`、`approval.request/resolve`、`question.request/resolve`、`tier.switch`、`banner`、`context`），只做加法。命令有回执，事件无回执；durable 事件写 transcript 可重放，ephemeral（delta/notice/activity）不落盘。新增能力：`turn.aborted`、`compact.*`、`command.result`、`session.cleared`、`mode.set`、session shims、`--dev-auth`、`snapshot.live`。协议源在 `neo-core-serve/src/protocol`，客户端 vendoring + fixtures conformance。详见 `docs/protocol-v1.md`。
+客户端与 core 的唯一契约是 WS 协议 v1.1：JSON 信封 + seq/epoch + attach 续传 + 快照，**冻结 v1 的判别名**（`turn.start`、`assistant.start/delta/end`、`tool.start/end`、`approval.request/resolve`、`question.request/resolve`、`tier.switch`、`banner`、`context`），只做加法。命令有回执，事件无回执；durable 事件写 transcript 可重放，ephemeral（delta/notice/activity）不落盘。新增能力：`turn.aborted`、`compact.*`、`command.result`、`session.cleared`、`mode.set`、session shims、`--dev-auth`、`snapshot.live`。协议源在 `neo-core-serve/src/protocol`，已于 C0 冻结（6 文件 lock），客户端 vendoring + fixtures conformance。详见 `docs/protocol-v1.md` 与 `docs/protocol-freeze.md`。
 
 ## 传输与鉴权
 

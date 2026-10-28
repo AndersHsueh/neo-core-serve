@@ -9,9 +9,9 @@
 
 ## 当前状态
 
-**设计 v0.3 完成（3 个评审 agent 修订后），C0 未开工。**
+**C0 完成（协议 v1.1 冻结 + reducer + 骨架 + docs:check）；C0b 待开工。**
 基线：neo **1052 pass / 0 fail / 67 文件** + PTY 21/21（2026-10-28 实跑/evidence；`tests/README.md` 的 1051/1 是旧口径）。
-事实源：`docs/matrix-core-v0-prd.md`、`architecture.md`、`protocol-v1.md`、`work-plan.md`、`decisions.md`。
+事实源：`docs/matrix-core-v0-prd.md`、`architecture.md`、`protocol-v1.md`、`work-plan.md`、`decisions.md`、`protocol-freeze.md`。
 
 ## 主题目录
 

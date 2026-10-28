@@ -1,6 +1,6 @@
 # Matrix-Core 协议 v1.1
 
-> 状态：draft v0.3 · 2026-10-28
+> 状态：**已冻结（C0，2026-10-28）** · v1.1 · 变更流程见 `protocol-freeze.md`
 > 唯一事实源：本文件 + `src/protocol/{types,guards,fixtures,reducer}.ts`。代码与本文冲突时，先改本文再改代码。
 > 基线：`neo-agent-app/gui/src/protocol`（v1 原型）。**v1 的判别名一律不动**；本版只做加法（新增可选字段/事件/命令）与语义收紧。
 > 目标：GUI 改动可控、CLI 将来能纯客户端化；协议可被 fixtures 双向验证。
