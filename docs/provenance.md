@@ -125,3 +125,10 @@ a832b2433427faad9e96d187b9077d27aa2eca125d6ace7f73ded25cc0a536d7  gui/src/protoc
 - `protocol.lock.json` 已生成（5 文件 sha256 + 来源 commit）；`docs:check` 校验哈希。
 - 传递依赖扫描证据：`docs/evidence/neo-deps.txt`（11 个模块闭包依赖 ui，含 agent/tools/system-prompt）。
 - 基线证据：`docs/evidence/baseline.txt`（neo 1052/0/67 + PTY 21/21 evidence）。
+
+## 8. v0.0.1 实现记录（C0b/C1/C2 子集，2026-10-28）
+
+- 已复制到 `src/core/`：agent/llm/config/classifier/tools/memory/wiki/mailbox/env/skills/session/checkpoint/shell/contextWindow/turnDiagnostics/maintenance/runtimeTmp/system-prompt，以及 `ui/`（v0.0.1 兼容层，v0.0.2 清理）；`hotkeys.ts` 未保留（select 内联类型）。
+- 移植改动：`agent.ts` 增 `streaming` 选项替代 isTTY；`config.ts` 的 `loadConfig` 按 `overrides.cwd` 搜索 settings，并修正下沉后 pkgRoot 层级。
+- 新增：`core/session-host.ts`（组合根/seq/epoch/transcript/审批/命令）、`core/protocol-io.ts`（AgentIO→事件）、`serve/*`（WS/stdio/dispatch/auth）、`main.ts`。
+- 事件体不带 seq（serve 的 eventFrame 剥离）；capabilities 为实际子集；快照暂由 host 生成（v0.0.2 移到 serve）。

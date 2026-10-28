@@ -17,7 +17,7 @@
   - 对**不认识的事件类型**：放行并忽略（capability 降级），不得因未知事件断连；
   - 对不认识的**命令**：返回 `protocol` 错误。
 - 破坏性变更 → `v: 2`（重命名/删字段/改语义）。
-- `ready.capabilities` 示例：
+- `ready.capabilities` 示例（core 实际只 advertise 已实现子集；v0.0.1 = `turn.aborted/command.structured/mode.set/snapshot.live/activity/question.multi`）：
   `["approval.diff.optional","question.multi","turn.aborted","command.structured","snapshot.live","transcript.replay","mode.set","peers","usage.extended","activity"]`
 
 ---
@@ -122,15 +122,15 @@ type ServerMessage =
 
 | 事件 | 字段 | 说明 |
 |---|---|---|
-| `turn.start` | `turnId, blockId, n, at, source, msgCount, userText?, clientId?, refs?` | `source:"user"\|"mailbox"`；`msgCount`=开轮前 messages 长度（恢复用） |
+| `turn.start` | `turnId, blockId, n, at, source?, msgCount?, userText?, clientId?, refs?` | `source:"user"\|"mailbox"`；`msgCount`=开轮前 messages 长度（恢复用） |
 | `assistant.start` | `blockId, at, tier` | |
-| `assistant.end` | `blockId, text` | **`text` 为权威全文**；客户端用它覆盖 delta 累积 |
+| `assistant.end` | `blockId, text?` | **有 `text` 时为权威全文**；客户端用它覆盖 delta 累积 |
 | `reasoning.start` | `blockId, at` | |
-| `reasoning.end` | `blockId, text, durationMs, tokens` | |
+| `reasoning.end` | `blockId, text?, durationMs, tokens` | |
 | `tool.start` | `blockId, toolCallId?, at, name, icon?, arg` | `arg` 预览串；`icon` 可选，缺省由客户端按 name 映射 |
 | `tool.end` | `blockId, state:"ok"\|"error"\|"denied", output, durationMs, truncated?, foot?, outputRef?` | `output`=预览；`outputRef` 为不透明 id（非路径） |
 | `approval.request` | `blockId, at, tool, detail, toolCallId?, path?, diff?, deadlineAt?, subagent?` | `blockId`=线格式请求 id；`diff` 可为 `null` |
-| `approval.resolve` | `blockId, state:"allowed"\|"denied", by` | `by:"user"\|"timeout"\|"no_client"\|"crash"\|"shutdown"\|"abort"` |
+| `approval.resolve` | `blockId, state:"allowed"\|"denied", by?` | `by:"user"\|"timeout"\|"no_client"\|"crash"\|"shutdown"\|"abort"` |
 | `question.request` | `blockId, at, prompt, options:{key,label,description?}[], header?, context?, multiSelect?, allowCustom?, deadlineAt?, subagent?` | |
 | `question.resolve` | `blockId, at, key?, keys?, custom?, answerLabel?, by` | `at` 新增（确定性 reducer）；`key` 兼容旧客户端 |
 | `tier.switch` | `from, to, reason, at` | 首个 LLM 请求前发出 |
@@ -272,7 +272,7 @@ SessionSnapshot = {
 
 ## 8. 错误码与关闭码
 
-`unauthorized` · `forbidden` · `not_found` · `conflict` · `rate_limited` · `timeout` · `approval_expired` · `question_expired` · `session_gone` · `slow_consumer` · `protocol` · `internal`
+`unauthorized` · `forbidden` · `not_found` · `conflict` · `rate_limited` · `timeout` · `approval_expired` · `question_expired` · `session_gone` · `slow_consumer` · `unsupported` · `protocol` · `internal`
 
 - 非 pending 的审批/提问（超时/已答/未知）统一 `approval_expired` / `question_expired`；`not_found` 只用于不存在的资源（session/ref）。
 - WS 关闭：4400 协议、4401 未授权、4408 慢消费者、1011 内部错误。

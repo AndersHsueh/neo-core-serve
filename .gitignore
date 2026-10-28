@@ -1,12 +1,27 @@
+# 依赖与构建产物
 node_modules/
 dist/
 coverage/
+*.tsbuildinfo
+
+# 运行时状态
 .run/
 .DS_Store
+
+# 本地配置：可能含明文 API key，绝不入库（用 settings.example.json 作模板）
+settings.json
 *.local
 .env
-*.tsbuildinfo
 
 # wiki 派生物与锁：能从 wiki 重建，不进版本控制
 .neo/wiki/outputs/
 .neo/wiki/.locks/
+
+# 其它 .neo 运行时产物（以仓库根为会话 cwd 时才可能出现）
+.neo/backups/
+.neo/tmp/
+.neo/exports/
+
+# 注意：以下必须入库，勿加 ignore ——
+#   src/protocol/**（协议真源）、protocol.lock.json（哈希锁）
+#   tests/**、scripts/**、docs/evidence/**（闸门证据）

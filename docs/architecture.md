@@ -108,7 +108,8 @@ matrix-core/
 
 ### 5.4 快照
 
-- 由 **serve** 用 `protocol/reducer` 生成（core 不 import protocol）。
+- 目标：由 **serve** 用 `protocol/reducer` 生成（core 不 import protocol）。
+  - **v0.0.1 临时偏差**：快照由 `core/session-host` 直接复用 reducer 生成（type-only + 纯函数），v0.0.2 移回 serve；已记入 release notes。
 - 形状见 protocol §6.3：`{meta, seq, epoch, blocks, context, lastTurn?, pendingApprovalId?, pendingQuestionId?, live?}`。
 - `live` 在 attach 时从 core 的当前 Agent 状态取（partial 文本/工具相位）。
 - 客户端 hydrate 保留未落盘的乐观消息（按 clientId）。
@@ -324,6 +325,7 @@ matrix-core serve [--cwd DIR] [--resume ID] [--port 0]
 
 - core semver tag；协议 v1（1.1 语义），只做加法；破坏性 → v2。
 - `ready` 带 `coreVersion/protocolVersion/capabilities/epoch`；客户端按能力降级。
+- **v0.0.1 实际能力子集**：`turn.aborted`、`command.structured`、`mode.set`、`snapshot.live`、`activity`、`question.multi`；不广告 `transcript.replay`/`peers`/`approval.diff.optional`。
 - 契约 fixtures 单源；客户端 vendor + `protocol.lock.json`。
 - 服务器兼容矩阵：core 至少兼容前一个协议的客户端（N-1 policy）。
 
@@ -404,7 +406,15 @@ matrix-core serve [--cwd DIR] [--resume ID] [--port 0]
 
 见 [decisions.md](decisions.md)（D1–D15）。
 
-## 23. 开放问题
+## 23. v0.0.1 已知偏差 / 未交付
+
+- 快照在 host 内生成（目标形态在 serve）；v0.0.2 调整。
+- 审批无断线宽限 / `no_client` / 滑动 deadline（只有固定超时 + allow-session 内存 allowlist）。
+- WS 无合批/背压（协议 §9 的 16ms/4KB、512 帧/8MB、4408 未实现）。
+- 未实现：`transcript.fetch`/`output.get`/`checkpoint.*`/`session.export`/`peers.list`/附件/图片/多会话 Hub。
+- 崩溃恢复采用保守策略：半轮一律补 `turn.aborted{crash}`（不按 meta.lastTurnId 推断完成）。
+
+## 24. 开放问题
 
 1. CLI 切换后的仓形态（留 neo / 新建 neo-agent-cli）。
 2. 远程访问项目如何复用协议（TLS/鉴权）。

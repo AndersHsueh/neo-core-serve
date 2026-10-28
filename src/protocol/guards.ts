@@ -241,6 +241,11 @@ export function decodeClientMessage(raw: unknown): DecodeResult<ClientCommand> {
     const ok = kind === "string" ? isStr(v) : kind === "number" ? isNum(v) : isBool(v);
     return ok ? { ok: true, value: v } : fail(`command ${type}: bad ${key}`);
   };
+  // v1.1：会话命令的 sessionId 可选（单会话 core 忽略；兼容 GUI 旧调用）
+  const optionalSession = (): DecodeResult<unknown> => {
+    if (!("sessionId" in command)) return { ok: true, value: undefined };
+    return isStr(command["sessionId"]) ? { ok: true, value: command["sessionId"] } : fail(`command ${type}: bad sessionId`);
+  };
 
   switch (type) {
     case "auth.login": {
@@ -256,7 +261,7 @@ export function decodeClientMessage(raw: unknown): DecodeResult<ClientCommand> {
     case "session.close":
     case "turn.abort":
     case "turn.send": {
-      const r = need("sessionId", "string");
+      const r = optionalSession();
       if (!r.ok) return r;
       if (type === "session.rename") {
         const t = need("title", "string");
@@ -271,21 +276,26 @@ export function decodeClientMessage(raw: unknown): DecodeResult<ClientCommand> {
       break;
     }
     case "approval.resolve": {
-      for (const key of ["sessionId", "blockId", "decision"]) {
-        const r = need(key, "string");
-        if (!r.ok) return r;
+      const r = optionalSession();
+      if (!r.ok) return r;
+      for (const key of ["blockId", "decision"]) {
+        const x = need(key, "string");
+        if (!x.ok) return x;
       }
       break;
     }
     case "question.answer": {
-      for (const key of ["sessionId", "blockId", "key"]) {
-        const r = need(key, "string");
-        if (!r.ok) return r;
-      }
+      const r = optionalSession();
+      if (!r.ok) return r;
+      const b = need("blockId", "string");
+      if (!b.ok) return b;
+      if ("keys" in command && !isArr(command["keys"])) return fail("question.answer: keys must be array");
+      if ("key" in command && !isStr(command["key"])) return fail("question.answer: bad key");
+      if ("custom" in command && !isStr(command["custom"])) return fail("question.answer: bad custom");
       break;
     }
     case "command.run": {
-      const r = need("sessionId", "string");
+      const r = optionalSession();
       if (!r.ok) return r;
       if (!isArr(command.args)) return fail("command.run: args must be array");
       break;

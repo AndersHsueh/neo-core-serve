@@ -616,30 +616,30 @@ export interface SessionCreateCommand {
 
 export interface SessionAttachCommand {
   type: "session.attach";
-  sessionId: string;
+  sessionId?: string;
   /** 已收到的最大 seq；缺省表示要完整快照 */
   lastSeq?: number;
 }
 
 export interface SessionDetachCommand {
   type: "session.detach";
-  sessionId: string;
+  sessionId?: string;
 }
 
 export interface SessionRenameCommand {
   type: "session.rename";
-  sessionId: string;
+  sessionId?: string;
   title: string;
 }
 
 export interface SessionCloseCommand {
   type: "session.close";
-  sessionId: string;
+  sessionId?: string;
 }
 
 export interface TurnSendCommand {
   type: "turn.send";
-  sessionId: string;
+  sessionId?: string;
   text: string;
   /** 幂等键；重连后 hub 用它识别重复投递 */
   clientId: string;
@@ -648,26 +648,33 @@ export interface TurnSendCommand {
 
 export interface TurnAbortCommand {
   type: "turn.abort";
-  sessionId: string;
+  sessionId?: string;
+  /** 目标轮；过期/不匹配 → 幂等 no-op（v1.1） */
+  turnId?: string;
 }
 
 export interface ApprovalResolveCommand {
   type: "approval.resolve";
-  sessionId: string;
+  sessionId?: string;
   blockId: string;
   decision: "allow" | "deny" | "allow-session";
 }
 
 export interface QuestionAnswerCommand {
   type: "question.answer";
-  sessionId: string;
+  sessionId?: string;
   blockId: string;
-  key: string;
+  /** 单选答案（兼容旧客户端） */
+  key?: string;
+  /** 多选答案（v1.1） */
+  keys?: string[];
+  /** 自由输入（v1.1） */
+  custom?: string;
 }
 
 export interface CommandRunCommand {
   type: "command.run";
-  sessionId: string;
+  sessionId?: string;
   name: string;
   args: string[];
 }
@@ -806,7 +813,10 @@ export type HubErrorCode =
   | "rate_limited"
   | "timeout"
   | "approval_expired"
+  | "question_expired"
   | "session_gone"
+  | "slow_consumer"
+  | "unsupported"
   | "protocol"
   | "internal";
 
