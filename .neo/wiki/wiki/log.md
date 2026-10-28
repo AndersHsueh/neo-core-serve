@@ -23,3 +23,7 @@
 ## [2026-10-28] wiki | 新建 [[发布-v0.0.2]]，INDEX/计划同步；GUI 联调指南 docs/gui-integration-v0.0.2.md
 ## [2026-10-28] deliverable | 今日会话汇总 [[汇总-Matrix-Core-v0.0.2]]：设计评审→C0→v0.0.1→v0.0.2；两次发布（48→92 tests）、团队分工、关键决策、simplify、风险与下一步
 ## [2026-10-29] wiki | v0.0.2 最终指针校正为 `47bd5ef`（tag 含发布后文档校正）；INDEX 新增「会话汇总」、更新来源链接与计划页进度
+
+## [2026-10-29] milestone | GUI 联调完成：neo-agent-app v0.1.0（tag `v0.1.0` → commit `de68bcc`）接入 v0.0.2 Hub，真实 LLM 全链路；GUI 侧 tsc 0 / vitest 47 / Playwright 12 全绿，Hub 协议探测 14 PASS/0 FAIL
+## [2026-10-29] wiki | 新建 [[联调-neo-agent-app-v0.1.0]]；INDEX 当前状态/「联调与客户端」分区/来源清单同步
+## [2026-10-29] todo | 联调暴露的后端待办：H1 create 落盘时机/title 语义、H2 `--cwd` 启动校验、H3 worker 空闲回收、H4 握手 401 vs 4401 文档纠偏、H5 list 占位摘要；另：回填验收 J2–J5、启动 C5 CLI 切换

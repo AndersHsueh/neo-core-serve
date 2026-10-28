@@ -10,6 +10,8 @@
 ## 当前状态
 
 **v0.0.2 已发布**（tag `v0.0.2` → commit `47bd5ef`）：PathPolicy/统一/WS 合批+fetch/Hub/附件，92 tests / 0 fail，verify ALL GREEN。下一阶段：与 `neo-agent-app` 联调、CLI 切换（C5）。
+
+**2026-10-29 GUI 联调完成**：`neo-agent-app` v0.1.0（tag `v0.1.0` → commit `de68bcc`）已接 v0.0.2 Hub 真实链路（发现即登录/多会话/流式/审批/提问/命令/附件/重连），e2e 12 + unit 47 全绿；暴露 7 项后端问题/文档纠偏（见 [[联调-neo-agent-app-v0.1.0]]）。下一阶段：v0.0.3（create 落盘/worker 回收/附件元数据）、回填验收 J2–J5、CLI 切换（C5）。
 基线：neo **1052 pass / 0 fail / 67 文件** + PTY 21/21（2026-10-28 实跑/evidence；`tests/README.md` 的 1051/1 是旧口径）。
 事实源：`docs/matrix-core-v0-prd.md`、`architecture.md`、`protocol-v1.md`、`work-plan.md`、`decisions.md`、`protocol-freeze.md`。
 
@@ -42,6 +44,12 @@
 |---|---|---|---|
 | 2026-10-28 会话 | [[汇总-Matrix-Core-v0.0.2]] | 设计评审→C0→v0.0.1→v0.0.2 全记录：团队、决策、测试、simplify、风险、下一步 | 2026-10-29 |
 
+### 联调与客户端
+
+| 主题 | 页面 | 一句话摘要 | 元数据 |
+|---|---|---|---|
+| GUI 联调 v0.1.0 | [[联调-neo-agent-app-v0.1.0]] | 真实 Hub + 真实 LLM 全链路：发现即登录/多会话/流式(markdown)/审批/提问/命令/附件/重连；e2e 12 + unit 47 全绿、探测 14 PASS；暴露 7 项后端问题 | GUI tag `v0.1.0` · 2026-10-29 |
+
 ### 迁移与开放问题
 
 | 主题 | 页面 | 一句话摘要 | 元数据 |
@@ -59,6 +67,7 @@
 - 代码来源：[`docs/provenance.md`](../../../docs/provenance.md)
 - 运维：[`docs/ops.md`](../../../docs/ops.md)
 - GUI 接入：[`docs/gui-integration-v0.0.2.md`](../../../docs/gui-integration-v0.0.2.md)
+- GUI 仓库：[`neo-agent-app`](../../../../neo-agent-app) · 联调报告：[`docs/integration-v0.0.2-report.md`](../../../../neo-agent-app/docs/integration-v0.0.2-report.md) · Hub 实测：[`docs/hub-probe-findings.md`](../../../../neo-agent-app/docs/hub-probe-findings.md)
 - 日志：[[log]]
 
 ## 维护提醒
