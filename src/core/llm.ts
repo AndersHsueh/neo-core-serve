@@ -8,6 +8,35 @@
  *  3. SSE 以空行分隔事件，末条为 data: [DONE]。
  */
 import { DEFAULT_RETRY_CONFIG, type Config, type RetryConfig } from "./config.ts";
+import { LLMError, LLMTimeoutError } from "./llm/types.ts";
+import {
+  OPAQUE_400_DOWNGRADE_FLOOR,
+  announceLearnedLimit,
+  appendMaxTokensHint,
+  effectiveMaxTokens,
+  learnedMaxTokens,
+  maxTokensKey,
+  parseMaxTokensLimit,
+  shouldDowngradeForOpaque400,
+} from "./llm/maxTokens.ts";
+
+export { LLMError, LLMTimeoutError } from "./llm/types.ts";
+export {
+  OPAQUE_400_DOWNGRADE_FLOOR,
+  appendMaxTokensHint,
+  effectiveMaxTokens,
+  isAuthErrorText,
+  isContextLengthErrorText,
+  isMaxTokensErrorText,
+  isParallelToolCallsRejection,
+  learnedMaxTokens,
+  maxTokensKey,
+  parseMaxTokensLimit,
+  resetLearnedMaxTokens,
+  resetMaxTokensLimitLearnedHandler,
+  setMaxTokensLimitLearnedHandler,
+  shouldDowngradeForOpaque400,
+} from "./llm/maxTokens.ts";
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
@@ -74,42 +103,29 @@ export interface StreamResult {
   raw: unknown;
 }
 
-export class LLMError extends Error {
-  /** 是否值得重试。4xx（408/409/425/429 除外）与「已输出后的中断」置 false。 */
-  retryable = true;
-  /** 服务端 Retry-After 给出的等待时长（毫秒）。 */
-  retryAfterMs?: number;
-  constructor(
-    message: string,
-    readonly status?: number,
-    readonly body?: string,
-  ) {
-    super(message);
-    this.name = "LLMError";
-  }
-}
-
-/** 连接/首字节或流式空闲超时（P0-1）。 */
-export class LLMTimeoutError extends LLMError {
-  constructor(
-    readonly kind: "connect" | "idle",
-    timeoutMs: number,
-  ) {
-    super(kind === "connect" ? `连接/首字节超时（${timeoutMs}ms）` : `流式响应空闲超时（${timeoutMs}ms）`);
-    this.name = "LLMTimeoutError";
-  }
-}
-
 /* ------------------------------------------------------------------ */
 /* 非流式                                                              */
 /* ------------------------------------------------------------------ */
 
-function buildBody(cfg: Config, messages: Message[], tools: ToolSpec[], stream: boolean) {
+/**
+ * 构造请求体。
+ *
+ * `respectLearned=false` 只给输出上限探测用：探测必须发精确候选值，
+ * 不能被已学到的上限夹紧。默认 true，普通请求走 effectiveMaxTokens。
+ */
+function buildBody(
+  cfg: Config,
+  messages: Message[],
+  tools: ToolSpec[],
+  stream: boolean,
+  respectLearned = true,
+) {
+  const maxTokens = respectLearned ? effectiveMaxTokens(cfg) : cfg.maxTokens;
   const body: Record<string, unknown> = {
     model: cfg.model,
     messages,
     stream,
-    max_tokens: cfg.maxTokens,
+    max_tokens: maxTokens,
     temperature: cfg.temperature,
   };
   if (tools.length > 0) {
@@ -146,7 +162,7 @@ async function describeError(res: Response): Promise<LLMError> {
   return new LLMError(msg, res.status, body);
 }
 
-export async function chat(
+async function chatOnce(
   cfg: Config,
   messages: Message[],
   tools: ToolSpec[] = [],
@@ -179,6 +195,41 @@ export async function chat(
     usage: json.usage ?? null,
     raw: json,
   };
+}
+
+/**
+ * 非流式请求。5xx 仍不在本函数重试（与抽出前一致）；
+ * 仅对可解析输出上限夹紧、以及不透明 400 降到地板各重发一次。
+ * 降级值不写入 learnedMaxTokens，避免单次观察污染后续请求。
+ */
+export async function chat(
+  cfg: Config,
+  messages: Message[],
+  tools: ToolSpec[] = [],
+): Promise<StreamResult> {
+  let clamped = false;
+  let opaqueDowngraded = false;
+  let activeCfg = cfg;
+  for (;;) {
+    try {
+      return await chatOnce(activeCfg, messages, tools);
+    } catch (e) {
+      const limit = clamped ? null : parseMaxTokensLimit(e, effectiveMaxTokens(activeCfg));
+      if (limit !== null) {
+        clamped = true;
+        learnedMaxTokens.set(maxTokensKey(cfg), limit);
+        announceLearnedLimit(cfg, limit, effectiveMaxTokens(activeCfg), e);
+        continue;
+      }
+      if (!opaqueDowngraded && shouldDowngradeForOpaque400(e, effectiveMaxTokens(activeCfg))) {
+        opaqueDowngraded = true;
+        activeCfg = { ...activeCfg, maxTokens: OPAQUE_400_DOWNGRADE_FLOOR };
+        continue;
+      }
+      if (e instanceof LLMError) appendMaxTokensHint(e);
+      throw e;
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -228,16 +279,51 @@ export async function chatStream(
   // 已经取消的 signal 不应再发请求（调用方可能在进入前就按了 ESC）。
   if (signal?.aborted) throw abortError();
   let attempt = 0;
+  /** 输出上限夹紧只做一次：夹过还被拒说明是别的问题，交给调用方。 */
+  let clamped = false;
+  /**
+   * 不透明 400 的安全降级：文案解析不出上限时夹到 OPAQUE_400_DOWNGRADE_FLOOR
+   * 重发一次。只降不升；降级值通过 activeCfg 覆盖，刻意不写 learnedMaxTokens。
+   */
+  let opaqueDowngraded = false;
+  let activeCfg = cfg;
   for (;;) {
     attempt += 1;
     try {
-      return await streamOnce(cfg, messages, tools, handlers, signal, policy);
+      return await streamOnce(activeCfg, messages, tools, handlers, signal, policy);
     } catch (e) {
       if (signal?.aborted) throw abortError();
       const err = e instanceof LLMError ? e : new LLMError((e as Error)?.message ?? String(e));
+      // max_tokens 超过该模型上限：学到上限、夹紧后同轮重发一次（不占重试预算）。
+      if (!clamped) {
+        const limit = parseMaxTokensLimit(err, effectiveMaxTokens(activeCfg));
+        if (limit !== null) {
+          clamped = true;
+          learnedMaxTokens.set(maxTokensKey(cfg), limit);
+          announceLearnedLimit(cfg, limit, effectiveMaxTokens(activeCfg), err);
+          handlers.onNotice?.(
+            `${cfg.model} 的输出上限是 ${limit.toLocaleString()} tokens（当前配置 ${cfg.maxTokens.toLocaleString()}），本次起自动夹紧并重发。`,
+          );
+          attempt -= 1;
+          continue;
+        }
+      }
+      // 不透明 400：文案解析不出上限、非上下文超长/鉴权/parallel 拒绝时，
+      // 夹到保守值重发一次。不占重试预算，且必须放在 canRetry 之前（4xx 本不重试）。
+      if (!opaqueDowngraded && shouldDowngradeForOpaque400(err, effectiveMaxTokens(activeCfg))) {
+        opaqueDowngraded = true;
+        const original = effectiveMaxTokens(activeCfg);
+        activeCfg = { ...activeCfg, maxTokens: OPAQUE_400_DOWNGRADE_FLOOR };
+        handlers.onNotice?.(
+          `网关拒绝了原 max_tokens=${original.toLocaleString()}（错误文案里解析不出上限），已降级到 ${OPAQUE_400_DOWNGRADE_FLOOR.toLocaleString()} 重发（仅本次请求；若持续失败请检查 settings.json 的 max_tokens 配置）。`,
+        );
+        attempt -= 1;
+        continue;
+      }
       const canRetry = err.retryable && isRetryableStatus(err.status);
       if (!canRetry || attempt >= policy.maxAttempts) {
         if (attempt > 1) err.message = `${err.message}（已尝试 ${attempt} 次）`;
+        appendMaxTokensHint(err);
         throw err;
       }
       const delay = backoffMs(attempt, policy, err.retryAfterMs);
