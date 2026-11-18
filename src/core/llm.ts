@@ -7,7 +7,7 @@
  *  2. tool_calls 以增量形式下发（delta.tool_calls 带 index），需按 index 拼接。
  *  3. SSE 以空行分隔事件，末条为 data: [DONE]。
  */
-import { DEFAULT_RETRY_CONFIG, isImplemented, type Config, type RetryConfig } from "./config.ts";
+import { DEFAULT_RETRY_CONFIG, IMPLEMENTED_PROVIDER_TYPES, isImplemented, type Config, type RetryConfig } from "./config.ts";
 import { LLMError, LLMTimeoutError } from "./llm/types.ts";
 import {
   OPAQUE_400_DOWNGRADE_FLOOR,
@@ -55,12 +55,22 @@ export interface ToolCall {
   function: { name: string; arguments: string };
 }
 
+/**
+ * Anthropic 的思考块（含签名），原样保存以便下一轮回带。
+ * 只在 Anthropic 协议路径下使用：OpenAI 路径、压缩、token 估算都忽略它。
+ */
+export type ThinkingBlock =
+  | { type: "thinking"; thinking: string; signature: string }
+  | { type: "redacted_thinking"; data: string };
+
 export interface Message {
   role: Role;
   content: string | ContentPart[] | null;
   name?: string;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
+  /** assistant 专用：上一轮 Anthropic 响应里的思考块，回带时排在 text/tool_use 之前。 */
+  thinking_blocks?: ThinkingBlock[];
 }
 
 /**
@@ -101,6 +111,8 @@ export interface StreamResult {
   finishReason: string | null;
   usage: Usage | null;
   raw: unknown;
+  /** Anthropic 协议下的思考块（含签名）；agent 写进 assistant 消息以便回带。 */
+  thinkingBlocks?: ThinkingBlock[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -113,6 +125,25 @@ export interface StreamResult {
  * `respectLearned=false` 只给输出上限探测用：探测必须发精确候选值，
  * 不能被已学到的上限夹紧。默认 true，普通请求走 effectiveMaxTokens。
  */
+/** OpenAI 协议不认 thinking_blocks，发出前剥掉，避免严格网关 400。 */
+function stripThinkingBlocks(messages: Message[]): Message[] {
+  if (!messages.some((m) => m.thinking_blocks !== undefined)) return messages;
+  return messages.map((m) => {
+    if (m.thinking_blocks === undefined) return m;
+    const { thinking_blocks: _drop, ...rest } = m;
+    return rest;
+  });
+}
+
+function assertImplementedRequestProtocol(cfg: Config): void {
+  const typ = cfg.providerType;
+  // 缺省按已接入的 OpenAI 路径走，兼容未填 providerType 的测试与旧调用方。
+  if (typ === undefined || isImplemented(typ)) return;
+  throw new LLMError(
+    `协议 ${typ} 尚未接入请求层（已实现：${IMPLEMENTED_PROVIDER_TYPES.join(", ")}）。选中 ${typ} 不会按 OpenAI 协议发送。`,
+  );
+}
+
 function buildBody(
   cfg: Config,
   messages: Message[],
@@ -123,7 +154,7 @@ function buildBody(
   const maxTokens = respectLearned ? effectiveMaxTokens(cfg) : cfg.maxTokens;
   const body: Record<string, unknown> = {
     model: cfg.model,
-    messages,
+    messages: stripThinkingBlocks(messages),
     stream,
     max_tokens: maxTokens,
     temperature: cfg.temperature,
@@ -208,6 +239,7 @@ export async function chat(
   messages: Message[],
   tools: ToolSpec[] = [],
 ): Promise<StreamResult> {
+  assertImplementedRequestProtocol(cfg);
   let clamped = false;
   let opaqueDowngraded = false;
   let activeCfg = cfg;
@@ -307,6 +339,7 @@ export async function chatStream(
   signal?: AbortSignal,
 ): Promise<StreamResult> {
   const policy = cfg.retry ?? DEFAULT_RETRY_CONFIG;
+  assertImplementedRequestProtocol(cfg);
   // 已经取消的 signal 不应再发请求（调用方可能在进入前就按了 ESC）。
   if (signal?.aborted) throw abortError();
   let attempt = 0;
