@@ -6,10 +6,9 @@
  *  - reasoning_content 不入历史，避免思维链污染后续轮次。
  */
 
-import { chatStream, estimateTokens, contentText, LLMError, type Message, type ToolSpec } from "./llm.ts";
+import { chatStream, estimateTokens, LLMError, type Message, type ToolSpec } from "./llm.ts";
 import {
   applyTier,
-  isImplemented,
   type Config,
   type ModelTier,
 } from "./config.ts";
@@ -19,20 +18,17 @@ import { c, colorEnabled } from "./ui/theme.ts";
 import { Classifier } from "./classifier/index.ts";
 import { dispatch, toolSpecs, toolNames, toolKindOf, TOOL_NAMES_EXCLUDED_FOR_SUBAGENT } from "./tools/index.ts";
 import { ToolError } from "./tools/types.ts";
-import { isRecallMessage } from "./memory/port.ts";
+import { applyCompaction, planCompaction } from "./agent/compact.ts";
 import { isContextOverflowError, parseContextLimitFromError } from "./contextWindow.ts";
 import { formatModelLine } from "./prompt/modelLine.ts";
 import {
-  COMPACT_INPUT_CHAR_CAP,
-  COMPACT_KEEP_TAIL,
-  COMPACT_MSG_CHAR_CAP,
   type AgentEvent,
   type AgentIO,
   type AgentOptions,
   type PermissionMode,
   type TurnStats,
 } from "./agent/types.ts";
-import { previewArgs, truncateArgs } from "./agent/format.ts";
+import { previewArgs } from "./agent/format.ts";
 import {
   budgetMessage,
   dropTransientMessage,
@@ -44,14 +40,18 @@ import {
   writeTurnLog,
 } from "./agent/support.ts";
 import {
+  CompactBlockedError,
   ensureUserPromptSubmit,
   runPreCompact,
   runSessionStart,
   runStopHooks,
 } from "./agent/lifecycle.ts";
+import type { CompactTrigger } from "./ports.ts";
 
 export type { AgentEvent, AgentIO, AgentOptions, PermissionMode, ToolEndEventData, ToolEventStatus, ToolStartEventData, TurnStats } from "./agent/types.ts";
 export { renderFinal } from "./agent/format.ts";
+export { CompactBlockedError } from "./agent/lifecycle.ts";
+export { applyCompaction, planCompaction } from "./agent/compact.ts";
 
 export class Agent {
   messages: Message[] = [];
@@ -252,67 +252,18 @@ export class Agent {
    * assistant(tool_calls) 与 tool 结果严格配对（如轮次边界、/compact 命令）。
    * 工具循环中途调用会拆散配对，下一轮请求会被服务端以协议错误拒绝。
    * 抛错式：失败向上传，由调用方决定如何呈现。
+   *
+   * K14：runPreCompact 在 planCompaction 与摘要请求之前调用；拒绝抛 CompactBlockedError，
+   * 不改历史、不调用摘要器。opts.from 为定点压缩（消息下标，含 system）。不迁 rewind。
    */
-  async compactNow(): Promise<{ beforeTokens: number; afterTokens: number }> {
-    // 召回临时消息不是历史的一部分：压缩输入与压缩后的历史都不应包含它
-    const convo = this.messages.slice(1).filter((m) => !isRecallMessage(m));
-    if (convo.length < 4) {
-      throw new ToolError("对话太短，压缩不划算（非 system 消息不足 4 条）");
-    }
-
-    // ---- 切分：摘要较早的部分，最近 N 条保留原文（P0-2）----
-    // 切点必须落在 user 消息之前：这样 assistant(tool_calls) 与紧随其后的
-    // tool 结果不会被拆开，下一轮请求的消息序列仍然合法。
-    // 保留条数优先 6 条；历史较短时按「至少给摘要留 2 条」退让，而不是按一半砍。
-    const desiredTail = Math.min(COMPACT_KEEP_TAIL, Math.max(2, convo.length - 2));
-    let cut = Math.max(0, convo.length - desiredTail);
-    while (cut > 0 && convo[cut]?.role !== "user") cut -= 1;
-    if (cut === 0) {
-      // 回退过头（最近的 user 落在初始切点之前）：改为以「最后一个 user」为切点，
-      // 保证最近一次提问及其后续回答以原文保留；否则短历史会只剩一条 assistant。
-      const lastUser = convo.map((m) => m.role).lastIndexOf("user");
-      if (lastUser > 0) {
-        cut = lastUser;
-      } else {
-        // 历史里根本没有可用的 user 边界（极少见）：保留最后一条，
-        // 且不要把 tool 结果与其 assistant 调用拆开。
-        cut = Math.max(1, convo.length - 1);
-        while (cut > 0 && convo[cut]?.role === "tool") cut -= 1;
-      }
-    }
-    const head = convo.slice(0, cut);
-    const tail = convo.slice(cut);
-    if (head.length === 0) throw new ToolError("找不到可压缩的安全切点");
-
-    const clip = (s: string, max = COMPACT_MSG_CHAR_CAP): string =>
-      s.length > max ? `${s.slice(0, max)}…[截断 ${s.length - max} 字符]` : s;
-
-    let convoText = head
-      .map((m) => {
-        if (m.role === "assistant" && m.tool_calls?.length) {
-          const calls = m.tool_calls
-            .map((tc) => `${tc.function.name}(${truncateArgs(tc.function.arguments, 500)})`)
-            .join("; ");
-          return `assistant(tool_call): ${clip(calls)}`;
-        }
-        if (m.role === "tool") return `tool(${m.name ?? ""}): ${clip(contentText(m.content) ?? "")}`;
-        return `${m.role}: ${clip(contentText(m.content) ?? "")}`;
-      })
-      .join("\n");
-    if (convoText.length > COMPACT_INPUT_CHAR_CAP) {
-      convoText = `${convoText.slice(0, COMPACT_INPUT_CHAR_CAP)}\n…[较早历史过长，已截断 ${convoText.length - COMPACT_INPUT_CHAR_CAP} 字符]`;
-    }
-
-    const convoTokens = estimateTokens(convo);
+  async compactNow(
+    opts: { from?: number; compactTrigger?: CompactTrigger } = {},
+  ): Promise<{ beforeTokens: number; afterTokens: number }> {
+    const pre = await this.runPreCompact(opts.compactTrigger ?? "manual");
+    if (pre.blocked) throw new CompactBlockedError(pre.reason);
+    const plan = planCompaction(this.messages, opts);
     const budget = Math.min(12_000, Math.floor(this.opt.cfg.contextWindow * 0.2));
-    const prompt =
-      `请把下面的对话历史压缩成一份结构化摘要，供后续继续工作使用。\n` +
-      `必须保留：用户的目标与明确要求、已确定的事实与结论、已改动的文件路径、关键代码片段、待办事项与未解决问题。\n` +
-      `丢弃：寒暄、重复内容、冗长的工具原始输出。\n` +
-      `输出纯文本摘要，不要加前言。\n` +
-      `注意：最近 ${tail.length} 条消息已保留原文、不在此次压缩范围内；摘要只需覆盖下面这段较早的历史。\n\n` +
-      `【较早的历史（共 ${head.length} 条消息）】\n${convoText}`;
-
+    const prompt = pre.context === "" ? plan.prompt : `${plan.prompt}\n\n【附加指令】\n${pre.context}`;
     const res = await this.streamFn(
       { ...this.opt.cfg, maxTokens: budget, temperature: 0.2 },
       [
@@ -333,8 +284,7 @@ export class Agent {
       this.totalReasoning += res.usage.completion_tokens_details?.reasoning_tokens ?? 0;
     }
 
-    // v0.2 记忆激活 §7.6.1 T2：压缩前捕获摘要 —— 历史即将被替换，
-    // 这轮对话的信息价值最高（决策/踩坑很可能只在这一轮里出现过）。
+    // v0.2 记忆激活 §7.6.1 T2：压缩前捕获摘要 —— 历史即将被替换。
     this.turnSeq += 1;
     try {
       this.opt.memory?.captureCompact(res.content.trim(), this.turnSeq);
@@ -342,29 +292,24 @@ export class Agent {
       // 记忆失败不影响压缩
     }
 
-    const sys = this.messages[0]?.role === "system" ? this.messages[0] : undefined;
-    const summaryMsg: Message = {
-      role: "user",
-      content:
-        `<对话摘要>\n${res.content.trim()}\n</对话摘要>\n\n` +
-        `（较早的 ${head.length} 条消息已压缩为上述摘要；最近 ${tail.length} 条保留原文。）`,
-    };
-    this.messages = [...(sys ? [sys] : []), summaryMsg, ...tail];
+    this.messages = applyCompaction(this.messages, res.content.trim(), plan);
     const afterTokens = estimateTokens(this.messages);
-    this.lastCompact = { beforeTokens: convoTokens, afterTokens };
-    this.opt.onEvent?.({ type: "compact", data: { beforeTokens: convoTokens, afterTokens } });
-    return { beforeTokens: convoTokens, afterTokens };
+    this.lastCompact = { beforeTokens: plan.convoTokens, afterTokens };
+    this.opt.onEvent?.({ type: "compact", data: { beforeTokens: plan.convoTokens, afterTokens } });
+    return { beforeTokens: plan.convoTokens, afterTokens };
   }
 
   /**
    * 压缩入口（薄壳，保持旧契约）：太短或失败返回 false，不抛错。
+   * PreCompact 拒绝不是 ordinary 失败：向上抛 CompactBlockedError，不得吞成 false。
    * /compact 命令与自动压缩走这里；工具触发的压缩走 compactNow + 标记收口。
    */
-  async compact(): Promise<boolean> {
+  async compact(opts: { from?: number; compactTrigger?: CompactTrigger } = {}): Promise<boolean> {
     try {
-      await this.compactNow();
+      await this.compactNow(opts);
       return true;
-    } catch {
+    } catch (e) {
+      if (e instanceof CompactBlockedError) throw e;
       return false;
     }
   }
@@ -530,6 +475,8 @@ export class Agent {
     let nudgeMsg: Message | null = null;
     /** 上下文溢出恢复只做一次（A2），避免无限压缩-重试循环。 */
     let overflowRecovered = false;
+    /** K14：自动压缩被 PreCompact 拒绝 —— 本轮明确停止，不 trim、不重试。 */
+    let compactBlocked: string | null = null;
     /** 输出撞墙写回通知每轮一次，避免同一轮多次 length 重复写盘。 */
     let outputLimitNotified = false;
     /** 本轮是否已产出最终正文（用于收口「循环结束但没回答」）。 */
@@ -548,7 +495,16 @@ export class Agent {
       const usage = estimateTokens(this.messages, specs) / this.opt.cfg.contextWindow;
       if (usage > this.opt.cfg.compactThreshold && this.messages.length > 6) {
         this.opt.console.info(`上下文使用率 ${(usage * 100).toFixed(0)}%，自动压缩中…`);
-        await this.compact();
+        try {
+          await this.compactNow({ compactTrigger: "auto" });
+        } catch (e) {
+          if (signal.aborted) { abortedFlag = true; break; }
+          if (e instanceof CompactBlockedError) {
+            compactBlocked = e.reason;
+            break;
+          }
+          // 普通压缩失败（历史太短 / 摘要器空）沿用旧语义：不中断本轮。
+        }
       }
 
       // A2：接近窗口上限（含本次 maxTokens 预留）时提前压缩。配置窗口可能偏大，
@@ -559,7 +515,18 @@ export class Agent {
           this.opt.cfg.contextWindow * 0.98
       ) {
         this.opt.console.info("上下文接近窗口上限，压缩后继续…");
-        const ok = await this.compact();
+        let ok: boolean;
+        try {
+          await this.compactNow({ compactTrigger: "auto" });
+          ok = true;
+        } catch (e) {
+          if (signal.aborted) { abortedFlag = true; break; }
+          if (e instanceof CompactBlockedError) {
+            compactBlocked = e.reason;
+            break;
+          }
+          ok = false;
+        }
         if (!ok) this.trimOldToolOutputs();
       }
 
@@ -875,9 +842,14 @@ export class Agent {
           }
           let compacted = false;
           try {
-            await this.compactNow();
+            await this.compactNow({ compactTrigger: "auto" });
             compacted = true;
-          } catch {
+          } catch (err) {
+            if (signal.aborted) { abortedFlag = true; break; }
+            if (err instanceof CompactBlockedError) {
+              compactBlocked = err.reason;
+              break;
+            }
             // 历史太短/压缩失败：退化为裁剪旧工具输出
           }
           if (!compacted) {
@@ -931,6 +903,14 @@ export class Agent {
       this.opt.console.warn(
         `已达最大工具迭代次数 ${maxIter}，本轮被截断 —— 上面的回答可能不完整。`,
       );
+    }
+
+    // K14：自动压缩被 PreCompact 拒绝 —— 本轮明确停止（不 trim、不重试）。
+    if (compactBlocked !== null) {
+      hadError = true;
+      errorMessage = `PreCompact 拒绝了自动压缩，本轮已停止：${compactBlocked}`;
+      this.opt.console.error(errorMessage);
+      this.opt.onEvent?.({ type: "error", data: errorMessage });
     }
 
     // 收口兜底：循环结束却没有最终正文（例：最后一次迭代恰好触发溢出恢复/迭代上限），

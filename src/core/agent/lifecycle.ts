@@ -73,7 +73,22 @@ export async function runStopHooks(
 }
 
 /**
- * PreCompact。默认 no-op：不拒绝、不改历史。本波不在 compactNow 前自动调用（K14）。
+ * 压缩被 PreCompact 端口拒绝（K14）。
+ *
+ * 与「压缩失败」分成两个类型：拒绝后必须原样保留历史与 lastCompact，
+ * 并且不得退化为 trimOldToolOutputs 或溢出恢复裁剪。普通失败仍走 ToolError。
+ * 这不是 hook runner，不得据此宣称 core 已具备 hooks。
+ */
+export class CompactBlockedError extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+    this.name = "CompactBlockedError";
+  }
+}
+
+/**
+ * PreCompact。默认 no-op：不拒绝、不改历史。
+ * K14：compactNow 在 planCompaction 与摘要请求之前调用。
  */
 export async function runPreCompact(
   this: Agent,
