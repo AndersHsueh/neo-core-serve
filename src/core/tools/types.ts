@@ -99,4 +99,9 @@ export interface DispatchResult {
   ok: boolean;
   output: string;
   truncated: boolean;
+  /**
+   * 工具是否真正跑过。未知工具 / 参数非法等连工具都没进的调用为 false，
+   * 必须区别于「跑了但失败」。缺省（undefined）视为已执行。
+   */
+  executed?: boolean;
 }

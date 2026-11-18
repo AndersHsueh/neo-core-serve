@@ -8,7 +8,13 @@ import type { Agent } from "../agent.ts";
 import { contentText, type Message } from "../llm.ts";
 import { appendTurnLog } from "../turnDiagnostics.ts";
 import type { ToolCtx } from "../tools/index.ts";
-import type { TurnStats } from "./types.ts";
+import type { ToolEventStatus, TurnStats } from "./types.ts";
+
+/** #37 / K12：把 DispatchResult 映射为工具事件状态。executed === false → not_executed。 */
+export function toolStatusOf(r: { ok: boolean; executed?: boolean }): ToolEventStatus {
+  if (r.executed === false) return "not_executed";
+  return r.ok ? "success" : "failure";
+}
 
 /**
  * 连续 capability 调用阈值（2026-10-26）。

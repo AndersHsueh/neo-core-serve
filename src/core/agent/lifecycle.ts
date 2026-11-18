@@ -2,8 +2,8 @@
  * Agent 对 LifecyclePort 的委托（K02）。
  *
  * 这里只做来源校验、子代理短路，以及把调用转到注入的端口（缺省 no-op）。
- * 不搬 hook runner，不解析 hook 语义载荷，不改 send/compact 循环切点
- * （那些注入点属于后续 K12/K14，本波不做）。
+ * 不搬 hook runner，不解析 hook 语义载荷。
+ * K12 在 send() 里于分类器前调用 ensureUserPromptSubmit；默认仍是 no-op。
  */
 import type { Agent } from "../agent.ts";
 import {
@@ -49,7 +49,7 @@ export async function runSessionStart(
 
 /**
  * 必要时补发 UserPromptSubmit。默认 no-op：放行、空上下文、不写历史。
- * 本波不在 send() 里自动调用（K12 再锁注入点）。
+ * K12：send() 在分类器与写历史之前调用；阻断时零模型请求且历史不动。
  */
 export async function ensureUserPromptSubmit(
   this: Agent,

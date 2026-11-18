@@ -70,6 +70,26 @@ export interface AgentEvent {
   data?: unknown;
 }
 
+/** 已有 tool_end 事件的执行状态（K12）。不是新的 Matrix 事件类型。 */
+export type ToolEventStatus = "success" | "failure" | "not_executed";
+
+export interface ToolStartEventData {
+  name: string;
+  call_id: string;
+  args: string;
+  paths?: string[];
+}
+
+export interface ToolEndEventData {
+  name: string;
+  call_id: string;
+  ok: boolean;
+  truncated: boolean;
+  status: ToolEventStatus;
+  output: string;
+  paths?: string[];
+}
+
 export interface AgentOptions {
   cfg: Config;
   /** 输出层。主代理传 Console，子代理输出静音（confirm/warn 可委托主 console）。 */

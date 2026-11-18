@@ -39,6 +39,7 @@ import {
   emitMemoryCapture,
   makeCtx,
   readGoalSafe,
+  toolStatusOf,
   trimOldToolOutputs,
   writeTurnLog,
 } from "./agent/support.ts";
@@ -49,7 +50,7 @@ import {
   runStopHooks,
 } from "./agent/lifecycle.ts";
 
-export type { AgentEvent, AgentIO, AgentOptions, PermissionMode, TurnStats } from "./agent/types.ts";
+export type { AgentEvent, AgentIO, AgentOptions, PermissionMode, ToolEndEventData, ToolEventStatus, ToolStartEventData, TurnStats } from "./agent/types.ts";
 export { renderFinal } from "./agent/format.ts";
 
 export class Agent {
@@ -436,12 +437,37 @@ export class Agent {
   ): Promise<TurnStats> {
     const started = Date.now();
     this.turnCounter += 1;
-    this.lastCompact = null;
     this.abort = new AbortController();
     const signal = this.abort.signal;
 
     const text = typeof userInput === "string" ? userInput : userInput.text;
     const images = typeof userInput === "string" ? [] : userInput.images;
+
+    // K12：UserPromptSubmit 必须在分类器之前、写历史之前。默认 no-op 放行。
+    // 阻断时零模型请求（含分类器）、历史不动。不启动真实 hook 进程。
+    const ups = await this.ensureUserPromptSubmit(text);
+    if (ups.blocked || signal.aborted) {
+      const msg = signal.aborted ? null : `UserPromptSubmit 阻断了本次输入：${ups.reason}`;
+      if (signal.aborted) this.opt.onEvent?.({ type: "aborted" });
+      this.lastStats = {
+        durationMs: Date.now() - started,
+        promptTokens: 0,
+        completionTokens: 0,
+        reasoningTokens: 0,
+        toolCalls: 0,
+        iterations: 0,
+        finishReason: signal.aborted ? "aborted" : "blocked",
+        aborted: signal.aborted,
+        hadError: false,
+        errorMessage: msg,
+        emptyResponse: false,
+        contextUsage: estimateTokens(this.messages, this.toolSpecsFor()) / this.opt.cfg.contextWindow,
+        tierSwitch: null,
+      };
+      this.writeTurnLog(this.lastStats);
+      return this.lastStats;
+    }
+    this.lastCompact = null;
 
     // 分类在消息入队之前完成，这样本轮从一开始就用对模型
     const tierSwitch = await this.classifyTurn(text);
@@ -754,19 +780,33 @@ export class Agent {
         for (const call of res.toolCalls) {
           toolCalls++;
           const name = call.function.name;
-          this.opt.onEvent?.({ type: "tool_start", data: { name, args: call.function.arguments } });
+          this.opt.onEvent?.({
+            type: "tool_start",
+            data: { name, call_id: call.id, args: call.function.arguments, paths: [] },
+          });
           this.opt.console.toolHeader(name, previewArgs(call.function.arguments));
 
           const r = await dispatch(name, call.function.arguments, ctx);
           this.opt.console.toolResult(r.output, 2, r.ok);
-          this.opt.onEvent?.({ type: "tool_end", data: { name, ok: r.ok, truncated: r.truncated } });
+          this.opt.onEvent?.({
+            type: "tool_end",
+            data: {
+              name,
+              call_id: call.id,
+              ok: r.ok,
+              truncated: r.truncated,
+              status: toolStatusOf(r),
+              output: r.output,
+              paths: [],
+            },
+          });
 
           // 连续失败计数：分类器据此判断当前档位是否撑不住。
-          // 成功即清零 —— 只关心连续失败，不累计历史失败。
-          if (r.ok) {
-            this.consecutiveFailures = 0;
-          } else {
-            this.consecutiveFailures++;
+          // 成功即清零。executed === false（未知工具 / 非法参数等）保持中性：
+          // 不累加也不清零，避免把「没执行」当成模型手段失败。
+          if (r.executed !== false) {
+            if (r.ok) this.consecutiveFailures = 0;
+            else this.consecutiveFailures++;
           }
 
           // 手段/目标分层计数（2026-10-26）：evidence 产出即清零，

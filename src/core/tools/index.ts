@@ -956,6 +956,7 @@ export async function dispatch(
       ok: false,
       output: `未知工具: ${name}。可用工具: ${toolNames().join(", ")}`,
       truncated: false,
+      executed: false,
     };
   }
 
@@ -971,6 +972,7 @@ export async function dispatch(
       ok: false,
       output: `工具 ${name} 的参数不是合法 JSON 对象: ${(e as Error).message}`,
       truncated: false,
+      executed: false,
     };
   }
 
