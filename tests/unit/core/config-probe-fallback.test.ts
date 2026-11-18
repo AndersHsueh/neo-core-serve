@@ -216,7 +216,7 @@ describe("K03b model_fallback 解析", () => {
 });
 
 describe("K03b 未知键忽略，不得启用权限或 MCP", () => {
-  test("mcpServers / hooks / permission_mode / parallel_tool_calls 不进入 Config 且不开启能力", () => {
+  test("hooks / permission_mode / parallel_tool_calls 不进入 Config；mcpServers 只进计量字段且不含启动命令", () => {
     const cfg = loadFrom({
       default_provider: "p",
       providers: [provider("p")],
@@ -227,7 +227,12 @@ describe("K03b 未知键忽略，不得启用权限或 MCP", () => {
       some_unknown_key: true,
     });
     const rec = cfg as unknown as Record<string, unknown>;
-    expect(rec["mcpServers"]).toBeUndefined();
+    // K09b：为对齐 4e3d7bb 的 prompt 计量，允许解析 name/alwaysLoad 子集。
+    // command/args/url/transport 不得进入 Config，避免被当成可启动的 MCP 功能面。
+    expect(cfg.mcpServers).toEqual([{ name: "fs" }]);
+    expect(JSON.stringify(cfg.mcpServers)).not.toContain("npx");
+    expect(JSON.stringify(cfg.mcpServers)).not.toContain("command");
+    expect(cfg.mcp).toEqual({ toolSearch: "auto", toolSearchThreshold: 10 });
     expect(rec["hooks"]).toBeUndefined();
     expect(rec["permission_mode"]).toBeUndefined();
     expect(rec["parallel_tool_calls"]).toBeUndefined();

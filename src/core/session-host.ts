@@ -67,7 +67,7 @@ import {
   type SessionMeta as NeoSessionMeta,
 } from "./session.ts";
 import { pathPolicyFor } from "./path.ts";
-import { buildSystemPrompt } from "./system-prompt.ts";
+import { PromptManager } from "./prompt/manager.ts";
 import { formatResumeWarning, outcomeOf, type LastTurnMeta } from "./turnDiagnostics.ts";
 import { refreshCapabilitiesAfterModelSwitch, resolveAndApplyModelWindow, recordModelContext } from "./env/modelWindows.ts";
 import { writeBackContextLimit, writeBackOutputLimit } from "./env/modelCaps.ts";
@@ -263,6 +263,7 @@ class SessionHost implements HostPort {
   private idSeq = 0;
 
   private agent!: Agent;
+  private promptManager!: PromptManager;
   private io!: ProtocolIO;
   private classifier!: Classifier;
   private memory: MemoryBridge | null = null;
@@ -488,6 +489,12 @@ class SessionHost implements HostPort {
         releases.push(registerTool(makeListPeersTool({ mailbox: mb })));
       }
 
+      this.promptManager = new PromptManager({
+        mailbox: this.mailbox !== null,
+        askUser: true,
+        sessionName: this.title,
+      });
+      this.loadProjectMemoryIntoManager();
       const systemPrompt = this.buildSystemPrompt();
       // K07：只给主请求注入备用链；compact/classifier/memory 仍走 chatStream。
       // 不新增 Matrix 事件，切换提示走 IO，避免改 protocol.lock。
@@ -505,6 +512,7 @@ class SessionHost implements HostPort {
         console: this.io,
         mode: this.mode,
         systemPrompt,
+        renderSystemPrompt: () => this.buildSystemPrompt(),
         // Agent 的交互式分支才有 beginStream/endStream 这对干净边界；
         // 文本仍走 onEvent（原始 chunk），IO 的写通道是 no-op（见 protocol-io 文件头）。
         streaming: this.opts.streaming ?? true,
@@ -602,26 +610,29 @@ class SessionHost implements HostPort {
   }
 
   private buildSystemPrompt(): string {
-    return buildSystemPrompt(this.cfg, {
-      mailbox: this.mailbox !== null,
-      askUser: true,
-    });
+    return this.promptManager.render(this.cfg).text;
   }
 
-  private injectProjectMemory(): void {
+  /** 把项目记忆交给 PromptManager，重建时不会丢。 */
+  private loadProjectMemoryIntoManager(): void {
     const candidates = ["AGENTS.md", "NEO.md", ".neo.md"]
       .map((f) => join(this.cfg.cwd, f))
       .find((p) => existsSync(p));
-    if (!candidates) return;
+    if (!candidates) {
+      this.promptManager.setProjectMemory(null);
+      return;
+    }
     try {
       const extra = readFileSync(candidates, "utf8");
-      const sys = this.agent.messages[0];
-      if (sys && typeof sys.content === "string") {
-        sys.content = `${sys.content}\n\n## 项目记忆（来自 ${candidates}）\n\n${extra}`;
-      }
+      this.promptManager.setProjectMemory({ path: candidates, text: extra });
     } catch {
       // 项目记忆读取失败不影响启动
     }
+  }
+
+  private injectProjectMemory(): void {
+    this.loadProjectMemoryIntoManager();
+    this.agent.refreshSystemPrompt();
   }
 
   /* ------------------------------------------------------------------ */
@@ -1305,6 +1316,8 @@ class SessionHost implements HostPort {
     const next = title.trim();
     if (!next) return;
     this.title = next;
+    this.promptManager.setSessionName(next);
+    this.agent.refreshSystemPrompt();
     this.emitMeta();
     this.persistMessages(null, null);
   }

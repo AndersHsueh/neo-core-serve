@@ -30,7 +30,10 @@ import {
   type ProviderConfig,
   type ProviderType,
   type RetryConfig,
+  type McpPromptConfig,
+  type McpServerMetering,
 } from "./types.ts";
+import { DEFAULT_MCP_CONFIG } from "../prompt/mcpMetering.ts";
 import { DEFAULT_SELECTION_CONFIG, TIER_ORDER, type PromptSelectionConfig } from "../prompt/select.ts";
 
 export type Raw = Record<string, unknown>;
@@ -383,6 +386,56 @@ export function resolveSystemPromptConfig(raw: unknown): PromptSelectionConfig {
     out.unknownWindowBudget = Math.floor(unknown);
   }
   if (typeof r["trust_known_window"] === "boolean") out.trustKnownWindow = r["trust_known_window"];
+  return out;
+}
+
+
+/**
+ * 解析 settings.mcp（K09b / #68 计量）。非法值回落默认，不报错。
+ * 只认 tool_search / tool_search_threshold；未知键忽略。不启动任何 MCP 进程。
+ */
+export function resolveMcpPromptConfig(raw: unknown): McpPromptConfig {
+  const out: McpPromptConfig = { ...DEFAULT_MCP_CONFIG };
+  if (raw === undefined || raw === null) return out;
+  if (typeof raw !== "object" || Array.isArray(raw)) return out;
+  const r = raw as Raw;
+  const mode = r["tool_search"];
+  if (mode === "auto" || typeof mode === "boolean") out.toolSearch = mode;
+  const threshold = r["tool_search_threshold"];
+  if (typeof threshold === "number" && Number.isFinite(threshold) && threshold >= 1) {
+    out.toolSearchThreshold = Math.floor(threshold);
+  }
+  return out;
+}
+
+/**
+ * 解析 settings.mcpServers（K09b / #68 计量）。
+ * 只保留合法 name 与 alwaysLoad；transport/command/url 等忽略。
+ * 非法条目跳过；缺省 / 非对象非数组 → []。不启动 server。
+ */
+export function resolveMcpServersForPrompt(raw: unknown): McpServerMetering[] {
+  if (raw === undefined || raw === null) return [];
+  const rows: Array<{ key?: string; value: unknown }> = [];
+  if (Array.isArray(raw)) {
+    for (const v of raw) rows.push({ value: v });
+  } else if (typeof raw === "object") {
+    for (const [k, v] of Object.entries(raw as Raw)) rows.push({ key: k, value: v });
+  } else {
+    return [];
+  }
+  const out: McpServerMetering[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (typeof row.value !== "object" || row.value === null || Array.isArray(row.value)) continue;
+    const r = row.value as Raw;
+    const name = typeof r["name"] === "string" && r["name"].trim() ? r["name"].trim() : (row.key ?? "").trim();
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const item: McpServerMetering = { name };
+    if (r["alwaysLoad"] === true) item.alwaysLoad = true;
+    out.push(item);
+  }
   return out;
 }
 

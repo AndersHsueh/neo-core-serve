@@ -76,6 +76,11 @@ export interface AgentOptions {
   console: AgentIO;
   mode: PermissionMode;
   systemPrompt: string;
+  /**
+   * 宿主注入的完整系统提示词渲染器（K09b）。
+   * 有它时 noteModelChange / 请求边界走整体重建；子代理或测试可不传。
+   */
+  renderSystemPrompt?: () => string;
   onEvent?: (e: AgentEvent) => void;
   /** 分类器。为 undefined 时不做自动分类。 */
   classifier?: Classifier;

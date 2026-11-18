@@ -261,10 +261,34 @@ export interface Config {
    * 本字段只影响 prompt 选档，不扩 compat 导出。
    */
   systemPrompt?: PromptSelectionConfig;
+  /**
+   * settings.mcpServers 的计量子集：只保留 name / alwaysLoad。
+   * 缺省 []。transport/command/url 忽略，不在本波启动任何进程。
+   */
+  mcpServers?: McpServerMetering[];
+  /**
+   * settings.mcp 的计量子集：tool_search / tool_search_threshold。
+   * 缺省 { toolSearch: "auto", toolSearchThreshold: 10 }（与 4e3d7bb 无 MCP 配置同一口径）。
+   */
+  mcp?: McpPromptConfig;
   /** 跨平台 shell 覆盖（v0.4.0 平台适配层；不填=自动探测）。 */
   shell?: ShellConfig;
   /** 环境探测/注入配置（v0.4.0；不填=默认开启、TTL 12h、注入+写 wiki 页）。 */
   env?: EnvConfig;
+}
+
+/**
+ * Prompt 计量用的 MCP 片段（K09b / #68）。不是 MCP 功能面：
+ * 不启动 server、不跑 tool_search、不改权限。缺省 = 无 server。
+ */
+export interface McpServerMetering {
+  name: string;
+  alwaysLoad?: boolean;
+}
+
+export interface McpPromptConfig {
+  toolSearch: "auto" | boolean;
+  toolSearchThreshold: number;
 }
 
 /**

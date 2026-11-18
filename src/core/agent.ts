@@ -21,6 +21,7 @@ import { dispatch, toolSpecs, toolNames, toolKindOf, TOOL_NAMES_EXCLUDED_FOR_SUB
 import { ToolError } from "./tools/types.ts";
 import { isRecallMessage } from "./memory/port.ts";
 import { isContextOverflowError, parseContextLimitFromError } from "./contextWindow.ts";
+import { formatModelLine } from "./prompt/modelLine.ts";
 import {
   COMPACT_INPUT_CHAR_CAP,
   COMPACT_KEEP_TAIL,
@@ -89,6 +90,12 @@ export class Agent {
   /** 最近一次压缩的前后 tokens（只用于本轮诊断日志）。 */
   /** @internal 供 agent/support.ts 使用 */
   lastCompact: { beforeTokens: number; afterTokens: number } | null = null;
+  /**
+   * 是否有请求在途（K09b）。在途时禁止改写 messages[0]，以免同一轮里
+   * 前后两次模型请求带上不同的系统提示词。窗口/模型/会话名的变化统一在
+   * 下一个请求边界生效（send() 开头的 refreshSystemPrompt）。
+   */
+  requestInFlight = false;
 
   constructor(readonly opt: AgentOptions) {
     this.mode = opt.mode;
@@ -198,18 +205,33 @@ export class Agent {
   }
 
   /**
-   * 模型 / provider 切换后同步系统提示词里的「模型」那一行。
-   * 不更新的话，模型看到的仍是启动时的旧模型名 —— 那会直接影响它的行为判断
-   * （例如是否该期待思维链先于正文出现）。
+   * 按当前配置整体重建系统提示词（档位、会话名、模型行、项目记忆一并刷新）。
+   * 宿主未提供 renderSystemPrompt（子代理/测试）时无事可做。
+   * 只替换 messages[0]：必须在请求边界调用，不要在流式响应进行中改写。
+   * 在途请求期间调用是安全无副作用的：直接返回，不改写 messages[0]。
    */
-  noteModelChange(cfg: Config): void {
+  refreshSystemPrompt(): void {
+    if (this.requestInFlight) return;
+    const render = this.opt.renderSystemPrompt;
+    if (!render) return;
     const sys = this.messages[0];
     if (!sys || sys.role !== "system") return;
-    // system 消息恒为 string（结构性约束）；类型扩宽后此处显式收窄
+    sys.content = render();
+  }
+
+  /**
+   * 模型 / provider 切换后同步系统提示词。
+   * 有宿主渲染器就整体重建（窗口变了档位也要重选）；否则只改写「模型」那一行。
+   */
+  noteModelChange(cfg: Config): void {
+    if (this.opt.renderSystemPrompt) {
+      this.refreshSystemPrompt();
+      return;
+    }
+    const sys = this.messages[0];
+    if (!sys || sys.role !== "system") return;
     const current = typeof sys.content === "string" ? sys.content : "";
-    const line =
-      `- 模型：${cfg.model}（provider ${cfg.providerName}，档位 ${cfg.modelTier}；` +
-      `这是推理模型，你的思维链会先于正文输出，这是正常的）`;
+    const line = formatModelLine(cfg);
     if (/- 模型：[^\n]*/.test(current)) {
       sys.content = current.replace(/- 模型：[^\n]*/, line);
     } else {
@@ -425,7 +447,10 @@ export class Agent {
     const tierSwitch = await this.classifyTurn(text);
     // 分类可能切 provider/model（v0.4.1 A2）：切完再解析当前模型的窗口事实。
     this.opt.refreshContextWindow?.();
-
+    // 请求边界：窗口/来源/会话名/模型任何一项在上一轮之后变了，档位与正文都要重选。
+    this.refreshSystemPrompt();
+    this.requestInFlight = true;
+    try {
     // v0.2 记忆激活 §7.7.2：本轮开始前自动召回（临时 system 消息，轮末摘除）。
     // 放在 user 消息之前：既是协议上最稳的位置，也让模型先看到历史再读问题。
     // 失败静默降级为「无记忆」—— 记忆是增强项，不是依赖项。
@@ -905,6 +930,9 @@ export class Agent {
     this.emitMemoryCapture(turnStart, "turn");
     this.writeTurnLog(this.lastStats);
     return this.lastStats;
+    } finally {
+      this.requestInFlight = false;
+    }
   }
 
 
