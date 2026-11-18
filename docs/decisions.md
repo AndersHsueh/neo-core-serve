@@ -1,6 +1,6 @@
 # 决策记录（ADR）
 
-> 状态：draft · 2026-10-28
+> 状态：draft · 2026-10-28，2026-11-19 修订 D1/D6/D11/D13
 > 格式：编号 · 日期 · 状态 · 背景 · 决策 · 后果。推翻旧决策时保留原文并标注 `Superseded by D#`。
 
 ---
@@ -14,8 +14,9 @@
 - **后果**：
   - core 代码通过「移植 + 冻结旧仓」进入新仓，而不是引用（D2）。
   - 客户端（GUI/CLI）vendor 协议类型/fixtures/命令表，用 conformance 测试防漂移。
-  - 过渡期存在两份代码，用「neo 冻结 + CLI 快速切换」压缩窗口（D11）。
+  - 过渡期存在两份代码，用「neo 冻结 + CLI 快速切换」压缩窗口（D11；2026-11-19 修订为两阶段，见下）。
 - **备选**：`file:` 依赖、submodule、monorepo（均被否）。
+- **修订（2026-11-19）**：D1 **对客户端仍然成立**——neo-tui、neo-agent-app、以后的手机端都是客户端，不得引用内核代码，只靠协议连接。开一个窄口：内核只有一份代码住处（neo-core-serve）；过渡期如果旧融合模式还要跑，是让 neo-cli 暂时用 core-serve 里的那份内核，而不是反过来、也不是再复制一份。明确不做：不要把 Hub worker 换成 `neo acp`，不要把「以 neo-cli 为运行时依赖」当成新一代内核。终点见 D11。
 
 ---
 
@@ -86,6 +87,7 @@
   - 快照/恢复保真；半轮不会污染下一轮 LLM 请求。
   - transcript 需要滚动/保留策略（30 天，可配）；torn last line 需容错。
 - **备选**：只存 messages（有损，否）；完整事件日志含 delta（写放大，否）。
+- **修订（2026-11-19）**：Hub **可以**写事件留档（transcript）；对话正文（messages）仍由 worker 写。这不改变「messages 是 LLM 上下文真源、路径从 id 重算」的其余约定。
 
 ---
 
@@ -139,15 +141,19 @@
 
 ---
 
-## D11 · neo v0.4.3 冻结，CLI 后续改为纯客户端
+## D11 · 两阶段真源：先以 neo-cli 为原型，追平后天平转到 core-serve
 
 - **日期**：2026-10-28
-- **状态**：已定
-- **背景**：D1 之后 CLI 无法共享 core 代码；若继续在 neo 加功能，会与 core 双份维护。
-- **决策**：`neo` 停留在 v0.4.3（critical hotfix 除外）；core v0 稳定后，把 CLI 改为客户端（连接本地 core，缺失时提示/自动 spawn），并删除内嵌 runtime。CLI 的 TUI/输入层全部保留。
+- **状态**：已修订（2026-11-19）
+- **背景**：D1 之后 CLI 无法共享 core 代码；若继续在 neo 加功能，会与 core 双份维护。2026-11-19 拍板终点：运行时只住在 neo-core-serve，neo-cli 仍是原型机，不能再按「neo 立刻冻结在 v0.4.3、本仓已经是唯一真源」执行。
+- **原决策（2026-10-28）**：`neo` 停留在 v0.4.3（critical hotfix 除外）；core v0 稳定后，把 CLI 改为客户端（连接本地 core，缺失时提示/自动 spawn），并删除内嵌 runtime。CLI 的 TUI/输入层全部保留。
+- **决策（2026-11-19 两阶段）**：
+  1. **现在**：原型/真源还在 neo-cli。功能在 neo-cli 验证；追平是把已验证的能力真正做进 core-serve 的内核。禁止再从 neo-cli 复制后双线维护。
+  2. **追平完成后天平转到 core-serve**：运行时只住在 neo-core-serve（daemon + 内核 + 多会话）。neo-tui、neo-agent-app、以后的手机端都是客户端，只靠协议连接。两边对齐后，融合结构的 neo-agent 退役。`neo` 命令可以留，但只负责启动 TUI 去连 daemon。
+  3. **明确不做**：不要把 Hub worker 换成 `neo acp`，不要把「core-serve 去调 neo-cli / 包一层 neo acp」当成新一代内核。测试里钉死某个 neo-cli commit 做对照可以，那是夹具，不是运行时依赖。
 - **后果**：
-  - CLI 切换是独立项目（C5），不属于本仓 v0/v0.5。
-  - 过渡期功能冻结，需要用户在发布节奏上接受。
+  - CLI 切换（纯客户端化）仍是独立工作，不属于把运行时再搬回 neo-cli。
+  - 过渡期融合模式如果还要跑，是让 neo-cli 用 core-serve 里的那份内核，而不是反过来（见 D1 窄口）。
 
 ---
 
@@ -172,6 +178,7 @@
 - **背景**：neo 的 `tools/index.ts` 定义了 `insideCwd` 却**从未调用**；read/write/edit/glob/list 可解析到 cwd 之外；`@refs` 解析在 CLI 侧（本仓不共享代码）。
 - **决策**：新增 `PathPolicy`（realpath + symlink 解析 + cwd 前缀）包裹所有文件操作：工具、@refs 解析、session 保存/导出、checkpoint undo、wiki/memory 写。负样本测试（`../`、绝对路径、symlink 逃逸、大小写/Unicode 变体）进 CI。
 - **后果**：比 neo 现状更严；可能改变少数「读系统文件」的用法，需在 PRD 的非目标里说明。
+- **修订（2026-11-19）**：PathPolicy 作为新一代默认留在 core-serve；不要改 neo-cli TUI 的默认行为来迁就本仓。
 
 ---
 
