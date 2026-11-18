@@ -54,7 +54,7 @@ describe("compat pack · 结构契约", () => {
     expect(imports.length).toBeGreaterThan(0);
     // 允许的只有标准库；出现点号包名（第三方）或已知第三方名即失败。
     const stdlib = new Set([
-      "argparse", "gzip", "hashlib", "io", "json", "os", "re", "shutil", "subprocess",
+      "argparse", "gzip", "hashlib", "io", "json", "re", "shutil", "subprocess",
       "sys", "tarfile", "tempfile", "pathlib", "__future__",
     ]);
     for (const name of imports) expect(stdlib.has(name.split(".")[0] ?? "")).toBe(true);
@@ -155,7 +155,11 @@ const runPack = (args: string[]): { code: number; stdout: string; stderr: string
 };
 
 /** 读 tgz 里的条目（用 python 标准库，避免测试引入 tar 依赖）。 */
-const readArchive = (tgz: string): Record<string, string> => {
+interface ArchiveContents {
+  entries: Record<string, string>;
+  meta: Array<[string, number, number, number, string, string, number]>;
+}
+const readArchive = (tgz: string): ArchiveContents => {
   const py = [
     "import tarfile,json,sys",
     "t=tarfile.open(sys.argv[1],'r:gz')",
@@ -167,7 +171,7 @@ const readArchive = (tgz: string): Record<string, string> => {
   ].join("\n");
   const r = spawnSync("python3", ["-c", py, tgz], { encoding: "utf8" });
   expect(r.status).toBe(0);
-  return JSON.parse(r.stdout) as unknown as Record<string, string>;
+  return JSON.parse(r.stdout) as ArchiveContents;
 };
 
 describe("compat pack · 行为契约", () => {
@@ -221,10 +225,7 @@ describe("compat pack · 行为契约", () => {
     expect(r.code).toBe(0);
     expect(existsSync(out)).toBe(true);
 
-    const archive = readArchive(out) as unknown as {
-      entries: Record<string, string>;
-      meta: Array<[string, number, number, number, string, string, number]>;
-    };
+    const archive = readArchive(out);
     expect(Object.keys(archive.entries).sort()).toEqual([
       "package/index.d.ts",
       "package/index.js",
