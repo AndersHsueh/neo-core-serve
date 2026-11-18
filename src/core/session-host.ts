@@ -29,6 +29,7 @@ import {
 import { dirname, join } from "node:path";
 
 import { Agent, type AgentEvent, type PermissionMode } from "./agent.ts";
+import { ModelFallbackController } from "./modelFallback.ts";
 import {
   MODEL_TIERS,
   applyTier,
@@ -70,7 +71,7 @@ import { buildSystemPrompt } from "./system-prompt.ts";
 import { formatResumeWarning, outcomeOf, type LastTurnMeta } from "./turnDiagnostics.ts";
 import { refreshCapabilitiesAfterModelSwitch, resolveAndApplyModelWindow, recordModelContext } from "./env/modelWindows.ts";
 import { writeBackContextLimit, writeBackOutputLimit } from "./env/modelCaps.ts";
-import { contentText, type Message, type chatStream } from "./llm.ts";
+import { chatStream, contentText, type Message } from "./llm.ts";
 import { registerTool } from "./tools/index.ts";
 import { makeTaskTool, runSubagent } from "./tools/task.ts";
 import { registerWikiTools } from "./tools/wiki.ts";
@@ -488,6 +489,17 @@ class SessionHost implements HostPort {
       }
 
       const systemPrompt = this.buildSystemPrompt();
+      // K07：只给主请求注入备用链；compact/classifier/memory 仍走 chatStream。
+      // 不新增 Matrix 事件，切换提示走 IO，避免改 protocol.lock。
+      const fallbackController =
+        this.cfg.modelFallback.length > 0
+          ? new ModelFallbackController({
+              cfg: this.cfg,
+              fallbacks: this.cfg.modelFallback,
+              stream: this.opts.chatStream ?? chatStream,
+              onNotice: (m) => this.io.info(m),
+            })
+          : null;
       this.agent = new Agent({
         cfg: this.cfg,
         console: this.io,
@@ -502,6 +514,18 @@ class SessionHost implements HostPort {
         ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}),
         sessionId: this.sessionId,
         ...(this.opts.chatStream ? { chatStream: this.opts.chatStream } : {}),
+        ...(fallbackController
+          ? {
+              mainChatStream: (
+                c: Parameters<typeof chatStream>[0],
+                m: Parameters<typeof chatStream>[1],
+                tools: Parameters<typeof chatStream>[2],
+                h?: Parameters<typeof chatStream>[3],
+                s?: Parameters<typeof chatStream>[4],
+              ) => fallbackController.stream(c, m, tools, h, s),
+              isFallbackActive: () => fallbackController.isActive,
+            }
+          : {}),
         askUser: (req) => this.io.askUser(req),
         refreshContextWindow: () => {
           try {

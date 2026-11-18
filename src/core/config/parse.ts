@@ -26,6 +26,7 @@ import {
   type ModelTier,
   type OutputProbeSettings,
   type PasteConfig,
+  type Config,
   type ProviderConfig,
   type ProviderType,
   type RetryConfig,
@@ -421,4 +422,57 @@ export function resolveModelFallback(raw: unknown, providers: ProviderConfig[]):
     return target;
   });
 }
+
+/**
+ * 配置窗口来源：provider 自己写了窗口就是 config，否则是默认值。
+ * C 没有 globalWindowExplicit 字段，缺省按 default。
+ */
+export function windowSourceFor(_cfg: Config, providerWindow: number | null | undefined): "config" | "default" {
+  return providerWindow != null ? "config" : "default";
+}
+
+/**
+ * 解析 CLI --fallback <provider>:<model>：在第一个冒号分割，两侧 trim 后必须非空。
+ * provider 名本身含冒号不支持，避免二义。本函数供组合根使用；本波不改 neo-cli。
+ */
+export function parseFallbackTarget(text: string, providers: ProviderConfig[]): ModelTarget {
+  const at = text.indexOf(":");
+  if (at <= 0 || at === text.length - 1) {
+    throw new ConfigError(`--fallback 需要 <provider>:<model>（收到 "${text}"）。`);
+  }
+  const target: ModelTarget = {
+    provider: text.slice(0, at).trim(),
+    model: text.slice(at + 1).trim(),
+  };
+  assertModelTarget(target, providers, "--fallback");
+  return target;
+}
+
+/**
+ * 把会话共享 cfg 切到目标 provider+model（#59 / K07）。
+ *
+ * 重新赋 provider/协议/key/baseUrl/model、输出预算、温度与窗口事实；
+ * 不复制来源模型的 maxTokens / 窗口 / baseUrl / key / 协议，也不写 settings。
+ * modelTier 保留当前展示档位，但 fallback 身份优先于档位路由。
+ * 未接入协议的目标必须抛错，不得静默按 OpenAI 发送。
+ */
+export function applyModelTarget(cfg: Config, target: ModelTarget): void {
+  const p = cfg.providers.find((x) => x.name === target.provider);
+  if (!p) throw new ConfigError(`备用目标 provider "${target.provider}" 不存在。`);
+  if (!isImplemented(p.type)) {
+    throw new ConfigError(`备用目标 provider "${target.provider}" 的 ${p.type} 协议未接入。`);
+  }
+  const g = cfg.globalDefaults;
+  cfg.providerName = p.name;
+  cfg.providerType = p.type;
+  cfg.apiKey = p.apiKey;
+  cfg.baseUrl = p.baseUrl;
+  cfg.model = target.model;
+  cfg.maxTokens = p.maxTokens ?? g.maxTokens;
+  cfg.temperature = p.temperature ?? g.temperature;
+  cfg.contextWindow = p.contextWindow ?? g.contextWindow;
+  cfg.configuredContextWindow = cfg.contextWindow;
+  cfg.contextWindowSource = windowSourceFor(cfg, p.contextWindow);
+}
+
 

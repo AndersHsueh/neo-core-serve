@@ -237,7 +237,7 @@ export interface Config {
   /** 透传给服务端的思考开关；不设则不下发该字段，由服务端自行决定。 */
   thinking?: { type: "enabled" | "disabled" };
   cwd: string;
-  /** 主模型请求失败后的有序备用链。缺省 / [] = 禁用。本批只解析，不执行切换。 */
+  /** 主模型请求失败后的有序备用链。缺省 / [] = 禁用。执行由 ModelFallbackController 负责，只作用于主请求。 */
   modelFallback: ModelTarget[];
   settingsPath: string | null;
   /**

@@ -57,6 +57,9 @@ import {
   resolvePasteConfig,
   resolveRetryConfig,
   resolveShellConfig,
+  parseFallbackTarget,
+  applyModelTarget,
+  windowSourceFor,
   str,
   bool,
   num,
@@ -80,6 +83,9 @@ export {
   resolveModelFallback,
   resolveOutputProbe,
   resolveRetryConfig,
+  parseFallbackTarget,
+  applyModelTarget,
+  windowSourceFor,
 };
 export type {
   Config,

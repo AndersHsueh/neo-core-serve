@@ -95,9 +95,17 @@ export class Agent {
     this.messages = [{ role: "system", content: opt.systemPrompt }];
   }
 
-  /** LLM 流式函数：注入优先，缺省真实实现。 */
+  /** LLM 流式函数：注入优先，缺省真实实现。compact / 子路径走这里。 */
   private get streamFn(): typeof chatStream {
     return this.opt.chatStream ?? chatStream;
+  }
+
+  /**
+   * #59 / K07：主 Agent 请求专用入口。组合根注入 ModelFallbackController.stream；
+   * 未注入时与 streamFn 完全一致（子代理、测试、compact/judge 不受影响）。
+   */
+  private get mainStreamFn(): typeof chatStream {
+    return this.opt.mainChatStream ?? this.streamFn;
   }
 
   get classifier(): Classifier | undefined {
@@ -356,6 +364,8 @@ export class Agent {
   ): Promise<TurnStats["tierSwitch"]> {
     const cls = this.opt.classifier;
     if (!cls) return null;
+    // #59 / K07：备用链保持期间自动分类不得把模型切走（会话内保持）。
+    if (this.opt.isFallbackActive?.()) return null;
 
     const cfg = this.opt.cfg;
     const before = cfg.modelTier;
@@ -553,7 +563,7 @@ export class Agent {
         // 空正文重试（尤其 finishReason=length）时临时放大输出预算。
         const reqCfg =
           retryMaxTokens !== null ? { ...this.opt.cfg, maxTokens: retryMaxTokens } : this.opt.cfg;
-        const res = await this.streamFn(
+        const res = await this.mainStreamFn(
           reqCfg,
           this.messages,
           specs,

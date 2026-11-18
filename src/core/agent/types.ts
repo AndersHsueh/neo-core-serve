@@ -85,6 +85,13 @@ export interface AgentOptions {
    */
   chatStream?: typeof chatStream;
   /**
+   * #59 / K07：仅主 Agent 的单次模型请求使用（组合根注入 ModelFallbackController.stream）。
+   * compact / judge / classifier / memory / subagent 继续走 chatStream，不自动获得各自备用链。
+   */
+  mainChatStream?: typeof chatStream;
+  /** #59 / K07：备用链保持期间为 true —— 自动分类不得把模型切走。 */
+  isFallbackActive?: () => boolean;
+  /**
    * 记忆端口（v0.2 记忆激活 §7.8.1）。不传 = 无记忆（子代理/task 默认如此）。
    * 记忆是增强项：任何调用失败都不得影响主流程。
    */
