@@ -72,7 +72,7 @@ export class MemoryBridge implements MemoryPort {
     const profile = this.readProfile();
     if (!profile) return null;
     const text = this.renderProfile(profile.content, profile.path);
-    const tokens = estimateTokens([{ role: "system", content: text }]);
+    const tokens = estimateTokens([{ role: "system", content: text } as Message]);
     return { message: { role: "system", content: text }, tokens };
   }
 
@@ -470,7 +470,7 @@ export class MemoryBridge implements MemoryPort {
     let body = sections.join("\n\n").trim();
     // token 截断：逐行收缩
     let lines = body.split("\n");
-    while (lines.length > 1 && estimateTokens([{ role: "system", content: lines.join("\n") }]) > budget) {
+    while (lines.length > 1 && estimateTokens([{ role: "system", content: lines.join("\n") } as Message]) > budget) {
       lines = lines.slice(0, -1);
     }
     body = lines.join("\n");

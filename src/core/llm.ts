@@ -38,7 +38,7 @@ export {
   shouldDowngradeForOpaque400,
 } from "./llm/maxTokens.ts";
 
-export type {
+import type {
   Role,
   ContentPart,
   ToolCall,
@@ -48,6 +48,16 @@ export type {
   Usage,
   StreamResult,
 } from "./llm/messageTypes.ts";
+export type {
+  Role,
+  ContentPart,
+  ToolCall,
+  ThinkingBlock,
+  Message,
+  ToolSpec,
+  Usage,
+  StreamResult,
+};
 
 /**
  * 取消息的纯文本视图（C8 适配收口）。

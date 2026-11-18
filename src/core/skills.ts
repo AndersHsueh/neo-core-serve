@@ -15,7 +15,7 @@ import { existsSync, readdirSync, readFileSync, statSync, symlinkSync, realpathS
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Config } from "./config.ts";
-import { estimateTokens } from "./llm.ts";
+import { estimateTokens, type Message } from "./llm.ts";
 
 /** 技能的来源标记。 */
 export type SkillSource = "project" | "global" | "extra";
@@ -260,10 +260,10 @@ const DESC_TOKEN_BUDGET = 40;
  * 所以硬编码 `- 4` 会**整体多算1 个 token**，60 汉字会算成 41 而被误截。
  * 这里动态取实测值，若将来 llm.ts 调整了开销口径，本处自动跟随，不会静默偏移。
  */
-const PER_MESSAGE_OVERHEAD = estimateTokens([{ role: "user", content: "" }], []);
+const PER_MESSAGE_OVERHEAD = estimateTokens([{ role: "user", content: "" } as Message], []);
 
 function tokensOf(text: string): number {
-  return Math.max(0, estimateTokens([{ role: "user", content: text }], []) - PER_MESSAGE_OVERHEAD);
+  return Math.max(0, estimateTokens([{ role: "user", content: text } as Message], []) - PER_MESSAGE_OVERHEAD);
 }
 
 /**
