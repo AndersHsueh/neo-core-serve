@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 import type { EnvConfig } from "./env/types.ts";
 import type { ShellConfig } from "./shell.ts";
+import type { WindowSource } from "./contextWindow.ts";
 
 import {
   DEFAULT_MAILBOX_CONFIG,
@@ -184,10 +185,12 @@ export interface Config {
   configuredContextWindow?: number;
   /**
    * contextWindow 的来源（v0.4.1 A2）：
-   *  - config = settings 值；models_api/overflow_error = 自动探测；known = 兜底表。
+   *  - config = settings 值；models_api/overflow_error = 自动探测；known = 兜底表；
+   *    default = 未知模型的通用默认值（猜的，不是事实）。
    *  只用于 /context 展示与排障，不参与序列化。
+   *  类型直接引用 `contextWindow.ts` 的 `WindowSource`，避免两处各写一份枚举。
    */
-  contextWindowSource?: "config" | "models_api" | "overflow_error" | "known";
+  contextWindowSource?: WindowSource;
   /** 顶层全局默认。provider 未覆盖某项时用它，切换 provider 时据此回滚。 */
   globalDefaults: { maxTokens: number; temperature: number; contextWindow: number };
   compactThreshold: number;

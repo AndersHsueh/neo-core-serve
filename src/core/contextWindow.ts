@@ -7,15 +7,35 @@
  *  2. 没有探测值 → 用配置值；
  *  3. 配置缺失才用已知模型兜底表（不拿猜测覆盖用户配置）。
  */
-import type { ModelContextInfo } from "./env/types.ts";
 
-export type WindowSource = "config" | "models_api" | "overflow_error" | "known";
+/**
+ * 窗口来源。`default` = 既无探测值、也无配置值、且模型不在已知兜底表里，
+ * 用的是通用默认值（200k）—— 必须与 `known`（命中兜底表）区分，不能冒充事实。
+ */
+export type WindowSource = "config" | "models_api" | "overflow_error" | "known" | "default";
+
+/**
+ * env 事实的最小结构（结构类型，不 import `env/types.ts`）。
+ *
+ * 为什么不用 `ModelContextInfo`：本文件是 `@neo/core-compat` 的唯一打包入口，
+ * 打包时只允许它零依赖；`env/types.ts` 会拖进整棵 shell/config 声明树。
+ * 这里的字段与 `ModelContextInfo` 的窗口子集逐字兼容，调用方传真实记录即可
+ * —— 多出的字段（updatedAt/evidence/...）照原样带回，保持 identity。
+ */
+export interface ContextWindowEnv {
+  /** 探测到的窗口；null = 只知道存在但没拿到值。 */
+  contextWindow: number | null;
+  source: "models_api" | "overflow_error" | "config" | "known";
+  updatedAt: string;
+  evidence?: string;
+  observedMaxPromptTokens?: number;
+}
 
 export interface ResolvedWindow {
   tokens: number;
   source: WindowSource;
   /** 命中 env 事实时带回完整记录（含 observedMaxPromptTokens 等）。 */
-  env?: ModelContextInfo;
+  env?: ContextWindowEnv;
 }
 
 /** 仅用于「配置缺失」时兜底；不覆盖用户显式配置，避免猜错。 */
@@ -34,13 +54,13 @@ export function knownWindow(model: string): number | null {
 }
 
 /**
- * 解析窗口：env 探测值 > 配置值 > 已知兜底。
+ * 解析窗口：env 探测值 > 配置值 > 已知兜底 > 通用默认。
  * env 里的 contextWindow 若非法（≤0/null）直接忽略。
  */
 export function resolveContextWindow(
   configured: number,
   model: string,
-  env?: ModelContextInfo | null,
+  env?: ContextWindowEnv | null,
 ): ResolvedWindow {
   if (env?.contextWindow && Number.isFinite(env.contextWindow) && env.contextWindow > 0) {
     return { tokens: Math.floor(env.contextWindow), source: env.source, env };
@@ -50,7 +70,8 @@ export function resolveContextWindow(
   }
   const known = knownWindow(model);
   if (known) return { tokens: known, source: "known" };
-  return { tokens: 200_000, source: "known" };
+  // 未知模型：值仍是 200k，但来源是 default —— 这是猜的，不是 known 事实。
+  return { tokens: 200_000, source: "default" };
 }
 
 const OVERFLOW_RE =
