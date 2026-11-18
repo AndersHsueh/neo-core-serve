@@ -48,7 +48,8 @@ type Scenario =
   | "image-detect"
   | "path-escape"
   | "slow"
-  | "resume";
+  | "resume"
+  | "shell-sleep";
 
 const SCENARIOS: readonly Scenario[] = [
   "tool-then-answer",
@@ -62,6 +63,7 @@ const SCENARIOS: readonly Scenario[] = [
   "path-escape",
   "slow",
   "resume",
+  "shell-sleep",
 ];
 
 function pickScenario(raw: string | undefined): Scenario {
@@ -397,6 +399,20 @@ function framesFor(scenario: Scenario, messages: WireMessage[]): string[] {
       for (let i = 0; i < SLOW_FRAMES; i++) frames.push(frame({ content: `片段${i + 1}。` }));
       frames.push(usageFrame(), ...finishFrames("stop"));
       return frames;
+    }
+
+    case "shell-sleep": {
+      // daemon SIGTERM 回收：拉起长期 sleep，再 touch 标记文件。命令由 FAKE_SHELL_COMMAND 注入。
+      if (rounds === 0) {
+        const command = process.env["FAKE_SHELL_COMMAND"] ?? "sleep 6; touch should-not-appear.txt";
+        return [
+          ...contentFrames("先跑一条慢命令。"),
+          ...toolCallFrames("call_fake_sleep", "shell", [JSON.stringify({ command })]),
+          usageFrame(),
+          ...finishFrames("tool_calls"),
+        ];
+      }
+      return [...contentFrames("命令跑完了。"), usageFrame(), ...finishFrames("stop")];
     }
 
     case "tool-then-answer":

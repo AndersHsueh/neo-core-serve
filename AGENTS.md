@@ -30,7 +30,7 @@ src/
   core/                  运行时：path.ts(PathPolicy) / paths.ts / commands/registry.ts / session-host / protocol-io / tools / memory / wiki / mailbox / env / ui(兼容层)
   serve/                 ws.ts / stdio.ts / frames.ts / batcher.ts / dispatch.ts / auth.ts / types.ts
   hub/                   server.ts（Hub WS + 会话路由）/ worker.ts（每会话 `serve --stdio` 子进程）
-  main.ts                matrix-core serve|hub|status|stop|doctor|version|help
+  main.ts                matrix-core serve|hub|daemon|status|stop|doctor|version|help（neo-core-serve 同入口）
 scripts/                 verify.sh / docs-check / gen-commands / freeze-protocol / fake-llm / deps-scan
 tests/                   guards（协议纯度/core 边界）/ unit（协议、seq/epoch、serve 契约、路径、delta 快路径）/ e2e（stdio、WS、锁、allow-session、question、degraded、resilience、附件、transcript.fetch、路径、命令一致性）
 ```
@@ -53,7 +53,7 @@ tests/                   guards（协议纯度/core 边界）/ unit（协议、s
 - **文档即契约**：PRD/架构/协议/计划/决策/发布说明任一变更同 commit 更新；`docs:check` 校验 lock/命令目录/链接/版本一致。
 - **证据**：`bash scripts/verify.sh` ALL GREEN 才发布；证据写 `docs/evidence/`（**必须入库**，勿 ignore）。
 - **.gitignore 约定**：忽略 `node_modules/ dist/ coverage/ *.tsbuildinfo .run/ .DS_Store settings.json *.local .env .neo/wiki/outputs/ .neo/wiki/.locks/ .neo/{backups,tmp,exports}/`；**不要忽略** `src/protocol/**`（含 `commands.json`）、`protocol.lock.json`、`tests/`、`scripts/`、`docs/evidence/`。本地 `settings.json` 可能含明文 key，用模板/`~/.neo/settings.json` 代替提交。
-- **不跨仓依赖**：禁止 `file:`/workspace/submodule 指向 `neo`/`neo-agent-app`；接口只走协议。
+- **不跨仓依赖**：客户端禁止 `file:`/workspace/submodule 指向内核；接口只走协议。内核住处在本仓（D1 窄口 / D11 两阶段）；不要把 Hub worker 换成 `neo acp`。
 - **Wiki 纪律**：里程碑/重要决策更新 `.neo/wiki/wiki/` 主题页 + `log.md`（append-only）；页头 `## 摘要` + `> 最后更新:YYYY-MM-DD`。
 
 ## 踩坑（评审与实作确认）

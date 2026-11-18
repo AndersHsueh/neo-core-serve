@@ -183,7 +183,8 @@ export type FakeScenario =
   | "image-detect"
   | "path-escape"
   | "slow"
-  | "resume";
+  | "resume"
+  | "shell-sleep";
 
 export interface FakeImagePart {
   mime: string;

@@ -7,7 +7,22 @@ import { join } from "node:path";
 import { decodeServerText } from "../protocol/guards.ts";
 import type { ClientCommand, ServerMessage } from "../protocol/types.ts";
 
+/** 向独立进程组发信号；失败则回退到 pid 本身。 */
+export function killProcessGroup(pid: number, signal: NodeJS.Signals | number): void {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      /* gone */
+    }
+  }
+}
+
 export interface WorkerOptions {
+
   cwd: string;
   resume?: string | null;
   env?: Record<string, string | undefined>;
@@ -58,7 +73,9 @@ export class WorkerClient {
 
   static async spawn(opts: WorkerOptions): Promise<WorkerClient> {
     const entry = process.env["MATRIX_CORE_ENTRY"] ?? join(import.meta.dir, "..", "main.ts");
-    const args = [process.execPath, entry, "serve", "--stdio", "--cwd", opts.cwd];
+    const extra = (opts.env?.["MATRIX_CORE_WORKER_ARGS"] ?? process.env["MATRIX_CORE_WORKER_ARGS"] ?? "").trim();
+    const extraArgs = extra ? extra.split(/\s+/).filter(Boolean) : [];
+    const args = [process.execPath, entry, "serve", "--stdio", "--cwd", opts.cwd, ...extraArgs];
     if (opts.resume) args.push("--resume", opts.resume);
     process.stderr.write(`[hub] spawn worker ${args.slice(1).join(" ")}\n`);
     const proc = Bun.spawn(args, {
@@ -67,7 +84,9 @@ export class WorkerClient {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
-    });
+      // 独立进程组：Hub 退出时可用 kill(-pid) 回收 shell 孙进程。
+      detached: true,
+    } as Parameters<typeof Bun.spawn>[1]);
     const client = new WorkerClient(proc, opts.cwd);
     try {
       await client.ready;
@@ -133,31 +152,51 @@ export class WorkerClient {
     return await snapshotPromise;
   }
 
-  async stopAndWait(timeoutMs = 2000): Promise<void> {
-    this.stop();
-    await Promise.race([this.exitPromise, new Promise<void>((r) => setTimeout(r, timeoutMs))]);
+  pid(): number {
+    return this.proc.pid;
   }
 
-  stop(): void {
-    if (this.exited) return;
-    this.exited = true;
+  closeStdin(): void {
     try {
-      this.proc.kill("SIGTERM");
+      const stdin = this.proc.stdin as unknown as { end?: () => void; flush?: () => void } | null;
+      stdin?.flush?.();
+      stdin?.end?.();
     } catch {
       /* ignore */
     }
-    setTimeout(() => {
-      try {
-        this.proc.kill(9);
-      } catch {
-        /* gone */
+  }
+
+  signalGroup(signal: NodeJS.Signals | number): void {
+    killProcessGroup(this.proc.pid, signal);
+  }
+
+  async waitExit(timeoutMs: number): Promise<boolean> {
+    const code = await Promise.race([
+      this.exitPromise.then(() => true),
+      new Promise<boolean>((r) => setTimeout(() => r(false), timeoutMs)),
+    ]);
+    return code;
+  }
+
+  async stopAndWait(timeoutMs = 2000): Promise<void> {
+    this.stop();
+    await this.waitExit(timeoutMs);
+  }
+
+  stop(): void {
+    if (!this.exited) {
+      this.exited = true;
+      this.closeStdin();
+      this.signalGroup("SIGTERM");
+      setTimeout(() => this.signalGroup("SIGKILL"), 500);
+      for (const [, p] of this.pending) {
+        clearTimeout(p.timer);
+        p.reject(new Error("worker stopped"));
       }
-    }, 500);
-    for (const [, p] of this.pending) {
-      clearTimeout(p.timer);
-      p.reject(new Error("worker stopped"));
+      this.pending.clear();
+      return;
     }
-    this.pending.clear();
+    this.signalGroup("SIGKILL");
   }
 
   alive(): boolean {

@@ -1,6 +1,6 @@
 # Matrix-Core 运维手册（v0.0.2）
 
-> 状态：**v0.0.2（2026-10-28，验收中）** · 适用：单会话 `serve` + 本地多会话 `hub`。
+> 状态：**v0.0.2 + S1 daemon 加固（2026-11-19）** · 适用：单会话 `serve` + 本地多会话 `hub` + 用户级 daemon。
 > 命令与路径以 `src/main.ts` 实现为准；本文按**实际行为**写，未实现项明确标版本。
 > 验收与已知限制见 [v0.0.2-acceptance.md](v0.0.2-acceptance.md)；GUI 联调见 [gui-integration-v0.0.2.md](gui-integration-v0.0.2.md)；线格式见 [protocol-v1.md](protocol-v1.md)。
 
@@ -15,7 +15,12 @@ matrix-core serve --cwd <项目目录> [--resume <id>] [--port 0]
                   [--stdio] [--token-file <path>] [--dev-auth]
 
 # 多会话 Hub（v0.0.2）
-matrix-core hub [--cwd <默认项目目录>] [--port 0] [--token-file <path>] [--dev-auth]
+matrix-core hub [--cwd <默认项目目录>] [--port 0] [--token-file <path>] [--dev-auth] [--daemon]
+# neo-core-serve 与 matrix-core 是同一入口的别名
+
+# 用户级 daemon（登录后自启；默认不开 linger）
+matrix-core daemon install [--port N] [--cwd DIR]
+matrix-core daemon uninstall | start | stop | restart | status | logs
 
 # 生命周期 / 目录
 matrix-core status | stop | doctor | version | help
@@ -24,11 +29,13 @@ bun run commands:gen      # 改 core/commands/registry.ts 后重生成 protocol/
 
 - **`serve`**：一进程 = 一会话；`--stdio` 不监听端口（stdout 只出帧，日志 stderr）；默认 WS 只绑 `127.0.0.1` 随机端口。
 - **`hub`**：Hub 进程**不跑 Agent**；每个会话 spawn 一个 `matrix-core serve --stdio --cwd <dir> [--resume id]` worker。Hub 负责 WS、会话路由、帧转发与流控。
-- **发现文件**：`~/.neo/run/core.json`（原子写）：`{url,pid,tokenFile,sessionId,epoch,startedAt}`；Hub 的 `sessionId/epoch` 为空串（会话在 attach 后确定）。token 在 `~/.neo/run/core.token`（0600，64 hex，重启轮换）。
-- **鉴权**：WS 子协议 `["neo.v1","bearer.<token>"]`；`--dev-auth` 时 `POST /api/auth/login {email,password}` 返回同一 token（仅回环 + Origin 白名单，非生产鉴权）。
+- **发现文件**：`~/.neo/run/core.json`（原子写，权限 **0600**，目录 **0700**）：字段仍是 `{url,pid,tokenFile,sessionId,epoch,startedAt}`（位置与字段不变，GUI 依赖）。Hub 的 `sessionId/epoch` 为空串（会话在 attach 后确定）。token 在 `~/.neo/run/core.token`（0600，64 hex）。**每次成功启动/重启都生成新 token**（不再复用旧文件）；客户端重读 `core.json` / `core.token` 即可（重启本身会断开旧连接）。
+- **单实例锁**：`~/.neo/run/core.lock/`（mkdir 独占 + `owner.json{pid,startedAt,kind}` + pid 存活检查 + 陈旧锁回收）。第二次 `hub` 若已有活着的 hub，打印已有 url 并以 0 退出（幂等）。`serve`（非 `--stdio`）与 `hub` 互斥。`--stdio` worker 不占这把锁。
+- **鉴权**：WS 子协议 `["neo.v1","bearer.<token>"]`；`--dev-auth` 时 `POST /api/auth/login {email,password}` 返回同一 token（仅回环 + Origin 白名单，非生产鉴权）。**daemon 模式禁用 `--dev-auth`**（`--daemon` 或 `MATRIX_CORE_DAEMON=1`）。
+- **用户服务**：macOS 为 `~/Library/LaunchAgents/com.neo.core-serve.plist`（`RunAtLoad=true`，`KeepAlive={SuccessfulExit:false}`，`ExitTimeOut=10`）；Linux 为 `~/.config/systemd/user/neo-core-serve.service`（`Restart=on-failure`，`TimeoutStopSec=10`，`KillMode=control-group`）。都是用户登录后启动；**默认不开 linger**（不调用 `loginctl enable-linger`）。端口默认随机（`--port 0`），安装时可指定固定端口。只绑 `127.0.0.1`。
 - **Origin 白名单**：`http://127.0.0.1:*`、`http://localhost:*`、`tauri://localhost`；无 Origin（脚本）允许但需 token。
 - **单写者 = 同一会话**：`~/.neo/run/locks/<id>/owner.json`（mkdir 独占 + pid 存活校验 + 陈旧锁回收）+ mailbox `.alive` 互认；同 session 双开 → `conflict`。Hub 不直接写会话文件（worker 写）。
-- 两个不同会话/服务会互相覆盖 `core.json`（`status/stop` 指向最后写入者）；**没有** `--force` 接管（v0.0.3 候选）。
+- 顶层 `status`/`stop` 仍读 `core.json` 并对 pid 发 SIGTERM；`daemon status/stop` 走用户服务，未安装服务时 `daemon stop` 回退为同样的 SIGTERM。单实例锁保证不会再互相覆盖 `core.json`。
 
 ### Hub 会话语义（v0.0.2）
 
@@ -47,10 +54,11 @@ bun run commands:gen      # 改 core/commands/registry.ts 后重生成 protocol/
 | `~/.neo/sessions/<id>.json` | messages + meta | 原子写；路径从 id 重算 |
 | `~/.neo/sessions/transcripts/<id>.ndjson` | header(epoch) + durable 事件 | 可重建视图；torn line 丢弃并重写；回放用 `transcript.fetch` |
 | `~/.neo/sessions/attachments/<sessionId>/img-N.<ext>` | 图片附件 | v0.0.2 新增；会话 JSON 存 `$ref`，resume hydrate |
-| `~/.neo/run/core.json` / `core.token` | 发现 / 鉴权 | token 0600；core.json 原子写（Hub 的 sessionId/epoch 为空） |
+| `~/.neo/run/core.json` / `core.token` | 发现 / 鉴权 | 均为 0600；目录 0700；core.json 字段不变（Hub 的 sessionId/epoch 为空）；每次启动轮换 token |
+| `~/.neo/run/core.lock/` | Hub/serve 单实例锁（owner.json） | mkdir 独占；陈旧锁回收；serve 与 hub 互斥 |
 | `~/.neo/run/locks/<id>/` | 单写者锁（owner.json） | 与 mailbox `.alive` 互认；只释放自己的锁 |
 | `~/.neo/logs/turns/<date>.jsonl` | 轮次诊断 | worker 写（多进程容忍） |
-| `~/.neo/logs/core/<date>.jsonl` | 结构化日志 | **未实现**（v0.0.3 候选；当前日志走 stderr + turn 诊断） |
+| `~/.neo/logs/core/stdout.log` · `stderr.log` | daemon 日志 | macOS LaunchAgent 重定向到此，程序按 5MB 轮转为 `*.1`；Linux 交 journald。`daemon logs` 读对应源 |
 | `~/.neo/mailbox/` | 身份/心跳/收件箱 | worker 启动创建身份并心跳 |
 | `~/.neo/env/<machineKey>.json` | 环境事实 | 沿用 |
 | `<cwd>/.neo/backups/<id>/` | 写文件检查点 | 经 PathPolicy 约束 |
@@ -93,11 +101,12 @@ matrix-core doctor    # run 目录 / token / core.json（最小实现）
 
 - **worker 启动顺序**：配置 → env → memory → mailbox → **锁** → session/transcript 对账 → 工具注册 → stdio ready。
 - **锁**：`run/locks/<id>/owner.json {pid, epoch, startedAt}`（mkdir 独占）+ pid 存活校验（EPERM 算存活）+ 陈旧锁 rename 抢占 + 只释放自己的锁；与 mailbox `.alive` 互认。
-- **Hub 停止（SIGTERM/SIGINT）**：停收帧 → 关闭所有连接/batcher → 对所有 worker SIGTERM →（500ms 后 SIGKILL 兜底）→ 清理 `core.json` → 退出。
-- **worker 停止**：SIGTERM → 收口待决项 → 轮中发 `turn.aborted{shutdown}` → 修 messages 尾 → persist → memory.flush → 释放锁。
+- **Hub 停止（SIGTERM/SIGINT）**：停止接新连接 → 给所有 attach 的客户端发 `turn.aborted{shutdown}` → 关闭每个 worker 的 stdin → 等待 → 对 worker 进程组 SIGTERM → SIGKILL 兜底；总时长小于 ExitTimeOut（10s）。清理 `core.json` 与单实例锁后退出。worker 以 detached 建独立进程组，Hub 兜底 `kill(-pgid)`。
+- **SIGHUP**：daemon 模式下忽略；前台运行按退出处理，退出码 **129**（与 neo-cli #75 约定一致）。
+- **worker 停止**：stdin EOF 或 SIGTERM → 收口待决项 → 轮中发 `turn.aborted{shutdown}` → 修 messages 尾 → persist → memory.flush → 释放锁。
 - **worker 崩溃**：Hub 检测退出 → 删除运行态、向 attach 的客户端发 `session.status{status:"dead"}` 并解绑；**不自动重启**（无退避），下次 attach 重新 spawn `--resume`，以磁盘 transcript/messages 恢复到最后完成轮。
 - **空闲回收**：**未实现**（v0.0.3 候选）；worker 会一直驻留到 close/detach 策略或 Hub 退出。
-- **Hub 退出**：给所有 worker SIGTERM（500ms 后 SIGKILL 兜底）；Hub 异常退出时 worker 的 stdin 关闭 → 自行优雅收尾（落盘/释放锁），随后可被新 Hub `--resume`。
+- **Hub 退出**：按上面的 stdin → SIGTERM → SIGKILL 进程组回收；Hub 异常退出时 worker 的 stdin 关闭 → 自行优雅收尾（落盘/释放锁），随后可被新 Hub `--resume`。
 - **session.close**：只停 worker、不删会话文件；再 attach 走 resume。
 
 ---
@@ -108,7 +117,7 @@ matrix-core doctor    # run 目录 / token / core.json（最小实现）
 - **同一 session id 禁止双开**（core 锁 + CLI mailbox `.alive` 互认）；Hub 下同一 session 还受「单客户端」限制。
 - 交替使用允许：旧 CLI 写 messages 后，core 打开时按 D6 对账（transcript 落后 → 从 messages 重建并标 degraded）。
 - 旧 CLI 忽略 transcript/attachments；core 不修改旧 CLI 的 `meta.path` 语义（写入前从 id 重算）。
-- 日志：worker 写 stderr + `logs/turns/`；`logs/core/` 分区未实现。
+- 日志：worker 写 stderr + `logs/turns/`；daemon 模式下 macOS 写 `logs/core/`（按大小轮转），Linux 交 journald。
 - 切换前建议**备份 `~/.neo/sessions`**；`matrix-core import` 未实现（v0.0.3 候选）。
 
 ---
@@ -131,14 +140,14 @@ matrix-core doctor    # run 目录 / token / core.json（最小实现）
 
 ## 8. 安全清单（v0.0.2 实况）
 
-- 只绑 `127.0.0.1`；token 0600（64 hex）；日志不打印 token；`--dev-auth` 默认关。
+- 只绑 `127.0.0.1`；token 与 core.json 均为 0600（token 64 hex，每次启动轮换）；日志不打印 token；`--dev-auth` 默认关，daemon 模式拒绝该开关。
 - Origin 白名单；非白名单 403；WS 鉴权失败 4401。
 - 密钥只在 core 内存 + 本地 settings（`~/.neo/settings.json` 推荐；含 key 的 `settings.json` 已被 `.gitignore` 忽略）；协议只给掩码；e2e 扫描协议帧/stderr/transcript/日志无明文 key。
 - **PathPolicy（v0.0.2 已接入）**：read/write/edit/list_dir/glob/grep 的路径参数、`@refs`、checkpoint undo 走 `core/path.ts`（cwd + realpath + symlink；`session.export` 未交付）；`..` 逃逸/外部绝对路径/symlink 逃逸拒绝。**已知窗口**：`resolveWrite` 校验后到实际写入之间目标可能被换成 symlink（v0.0.3 O_NOFOLLOW）。
 - 附件：mime 三选一 + ≤5 张/≤5MB，超限 `too_large`；入站帧 >8MB → `too_large`；原始 base64 不写日志/transcript。
 - 注意：v0.0.2 协议不回传附件元数据 → 历史轮次图片不可渲染（v0.0.3）。
 - `plan` 只读；shell 每次审批；allow-session 仅按工具名 `write_file`/`edit_file` 内存记忆（shell 永不；**不校验 cwd/路径**）。
-- 目录 0700，会话/日志/token 文件 0600。
+- 目录 0700（含 `~/.neo/run`），会话/日志/token/`core.json` 文件 0600。
 
 ---
 

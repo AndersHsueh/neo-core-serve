@@ -25,3 +25,6 @@ settings.json
 # 注意：以下必须入库，勿加 ignore ——
 #   src/protocol/**（协议真源）、protocol.lock.json（哈希锁）
 #   tests/**、scripts/**、docs/evidence/**（闸门证据）
+
+# 本地 git worktree（不要入库）
+.neo/worktrees/

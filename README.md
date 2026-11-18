@@ -44,6 +44,7 @@ curl -s http://127.0.0.1:<port>/health
 
 # 生命周期
 bun run src/main.ts status   # 读 core.json + pid 存活
+bun run src/main.ts daemon install|status|logs   # 用户级常驻（登录后自启）
 bun run src/main.ts stop     # SIGTERM 优雅关闭（worker 收尾 → 释放锁 → 清理 core.json）
 bun run src/main.ts doctor   # run 目录 / token / core.json 自检
 

@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Matrix-Core：neo 的核心运行时服务（独立进程、无终端依赖）",
   "bin": {
-    "matrix-core": "./src/main.ts"
+    "matrix-core": "./src/main.ts",
+    "neo-core-serve": "./src/main.ts"
   },
   "scripts": {
     "start": "bun run src/main.ts",

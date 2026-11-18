@@ -2,7 +2,8 @@
  * serve/auth.ts — 本地鉴权与发现文件。
  *
  * - token：`~/.neo/run/core.token`（0600），可用 --token-file 覆盖；
- * - 发现：`~/.neo/run/core.json`（原子写，pid 校验）。
+ *   每次成功启动/重启调用 rotateToken 生成新 token（与 docs/ops.md 一致）；
+ * - 发现：`~/.neo/run/core.json`（原子写，权限 0600；目录 0700）。
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -29,22 +30,41 @@ export function runFile(env: NodeJS.ProcessEnv = process.env): string {
   return coreRunFile(env);
 }
 
-export function loadOrCreateToken(file: string): string {
-  if (existsSync(file)) {
-    const raw = readFileSync(file, "utf8").trim();
-    if (raw.length >= 16) return raw;
-  }
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  const token = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+function randomToken(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(32)))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
-  writeFileSync(file, `${token}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+function ensurePrivateFile(file: string, body: string): void {
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(dirname(file), 0o700);
+  } catch {
+    /* 非 POSIX 忽略 */
+  }
+  writeFileSync(file, body, { encoding: "utf8", mode: 0o600 });
   try {
     chmodSync(file, 0o600);
   } catch {
     /* 非 POSIX 忽略 */
   }
+}
+
+/** 每次成功启动/重启都生成新 token，客户端重读 core.json / core.token。 */
+export function rotateToken(file: string): string {
+  const token = randomToken();
+  ensurePrivateFile(file, `${token}\n`);
   return token;
+}
+
+/** 仅在 token 文件尚不存在或过短时创建（doctor / 兼容路径）。启动必须走 rotateToken。 */
+export function loadOrCreateToken(file: string): string {
+  if (existsSync(file)) {
+    const raw = readFileSync(file, "utf8").trim();
+    if (raw.length >= 16) return raw;
+  }
+  return rotateToken(file);
 }
 
 /** 从 WS 子协议里取 bearer token */
@@ -66,9 +86,19 @@ export function tokenMatches(expected: string, got: string | null): boolean {
 
 export function writeRunInfo(file: string, info: RunInfo): void {
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(dirname(file), 0o700);
+  } catch {
+    /* 非 POSIX 忽略 */
+  }
   const tmp = `${file}.tmp-${process.pid}`;
-  writeFileSync(tmp, `${JSON.stringify(info, null, 2)}\n`, "utf8");
+  writeFileSync(tmp, `${JSON.stringify(info, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   renameSync(tmp, file);
+  try {
+    chmodSync(file, 0o600);
+  } catch {
+    /* 非 POSIX 忽略 */
+  }
 }
 
 export function clearRunInfo(file: string, pid = process.pid): void {

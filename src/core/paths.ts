@@ -80,3 +80,13 @@ export function runFile(env: EnvLike = process.env): string {
 export function logsDir(env: EnvLike = process.env): string {
   return nonEmpty(env["NEO_LOG_DIR"]) ?? join(neoHome(env), "logs");
 }
+
+/** 单实例锁目录：`<run>/core.lock`。 */
+export function instanceLockDir(env: EnvLike = process.env): string {
+  return join(runDir(env), "core.lock");
+}
+
+/** Hub/daemon 日志目录：`<logs>/core`（`NEO_CORE_LOG_DIR` 可覆盖）。 */
+export function coreLogsDir(env: EnvLike = process.env): string {
+  return nonEmpty(env["NEO_CORE_LOG_DIR"]) ?? join(logsDir(env), "core");
+}

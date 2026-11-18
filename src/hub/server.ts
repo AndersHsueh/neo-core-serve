@@ -59,6 +59,7 @@ export function startHub(opts: HubOptions): HubHandle {
   const log = (line: string): void => {
     process.stderr.write(`${line}\n`);
   };
+  let accepting = true;
   const originAllowed = (origin: string | null): boolean => origin === null || LOCAL_ORIGIN.test(origin);
 
   const metaCache = new Map<string, { mtimeMs: number; meta: SessionMeta }>();
@@ -259,6 +260,7 @@ export function startHub(opts: HubOptions): HubHandle {
         });
       }
       if (url.pathname === "/api/auth/login" && req.method === "POST") {
+        if (!accepting) return new Response("shutting down", { status: 503 });
         if (!opts.devAuth) return new Response("dev auth disabled", { status: 403 });
         if (!originAllowed(req.headers.get("origin"))) return new Response("forbidden origin", { status: 403 });
         return Response.json({
@@ -268,6 +270,7 @@ export function startHub(opts: HubOptions): HubHandle {
         });
       }
       if (url.pathname === "/ws") {
+        if (!accepting) return new Response("shutting down", { status: 503 });
         if (!originAllowed(req.headers.get("origin"))) return new Response("forbidden origin", { status: 403 });
         const tok = tokenFromProtocols(req.headers.get("sec-websocket-protocol") ?? undefined);
         if (!tokenMatches(opts.token, tok)) return new Response("unauthorized", { status: 401 });
@@ -442,20 +445,80 @@ export function startHub(opts: HubOptions): HubHandle {
 
   log(`[hub] ws listening on ws://127.0.0.1:${server.port}/ws`);
 
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
   return {
     url: `ws://127.0.0.1:${server.port}/ws`,
     async stop() {
-      for (const [, conn] of conns) conn.batcher.close();
-      conns.clear();
+      const deadline = Date.now() + 9_000; // 小于 ExitTimeOut 10s，给外层清文件留余量
+      const remain = (): number => Math.max(0, deadline - Date.now());
+      accepting = false;
+
+      // 给所有已 attach 的客户端发 turn.aborted{shutdown}，并立刻 flush 合批队列。
+      for (const [sessionId, entry] of workers) {
+        if (!entry.owner) continue;
+        const conn = connOf(entry.owner);
+        if (!conn) continue;
+        entry.lastSeq += 1;
+        conn.batcher.enqueue({
+          v: PROTOCOL_VERSION,
+          kind: "event",
+          sessionId,
+          seq: entry.lastSeq,
+          event: {
+            type: "turn.aborted",
+            turnId: "shutdown",
+            at: Date.now(),
+            reason: "shutdown",
+          },
+        });
+        conn.batcher.flush();
+      }
+
+      // 先关 worker stdin（serve --stdio 在 EOF 后走 host.close → turn.aborted{shutdown}）。
+      for (const [, entry] of workers) {
+        entry.client.closeStdin();
+      }
+      const afterStdin = Math.min(2_000, remain());
+      if (afterStdin > 0) {
+        await Promise.race([
+          Promise.all([...workers.values()].map((e) => e.client.waitExit(afterStdin))),
+          sleep(afterStdin),
+        ]);
+      }
+
+      // SIGTERM 进程组（含 shell 孙进程）。
+      for (const [, entry] of workers) {
+        entry.client.signalGroup("SIGTERM");
+      }
+      const afterTerm = Math.min(5_000, remain());
+      if (afterTerm > 0) {
+        await Promise.race([
+          Promise.all([...workers.values()].map((e) => e.client.waitExit(afterTerm))),
+          sleep(afterTerm),
+        ]);
+      }
+
+      // SIGKILL 兜底。
       for (const [, entry] of workers) {
         entry.unsub();
         entry.unsubExit();
-        entry.client.stop();
+        entry.client.signalGroup("SIGKILL");
       }
+      const afterKill = Math.min(1_500, remain());
+      if (afterKill > 0) {
+        await Promise.race([
+          Promise.all([...workers.values()].map((e) => e.client.waitExit(afterKill))),
+          sleep(afterKill),
+        ]);
+      }
+
+      for (const [, conn] of conns) conn.batcher.close();
+      conns.clear();
       workers.clear();
       await Promise.race([
         Promise.resolve(server.stop(true)).catch(() => undefined),
-        new Promise<void>((resolve) => setTimeout(resolve, 150)),
+        sleep(Math.min(150, remain() || 150)),
       ]);
     },
   };

@@ -1,31 +1,42 @@
 #!/usr/bin/env bun
 /**
- * matrix-core —— neo 的核心运行时服务（v0.0.1 单会话）。
+ * matrix-core —— neo 的核心运行时服务（v0.0.2 多会话 Hub + 用户级 daemon）。
  *
  * 子命令：
- *   serve   启动核心服务（默认 WS；--stdio 走行分隔帧）
+ *   serve   启动单会话核心服务（默认 WS；--stdio 走行分隔帧）
+ *   hub     本地多会话 Hub（每会话一个 serve --stdio worker）
+ *   daemon  用户级常驻：install|uninstall|status|start|stop|restart|logs
  *   status  查看 ~/.neo/run/core.json
  *   stop    停掉本机实例（SIGTERM）
  *   doctor  环境自检
  *   version / help
+ *
+ * `neo-core-serve` 是同一入口的别名。
  */
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createSessionHost } from "./core/session-host.ts";
 import { PROTOCOL_SEMVER, PROTOCOL_VERSION } from "./protocol/types.ts";
-import { clearRunInfo, defaultTokenFile, loadOrCreateToken, runFile, runDir, writeRunInfo } from "./serve/auth.ts";
+import { clearRunInfo, defaultTokenFile, rotateToken, runFile, runDir, writeRunInfo } from "./serve/auth.ts";
 import { runStdio } from "./serve/stdio.ts";
 import { startWsServer } from "./serve/ws.ts";
 import { startHub } from "./hub/server.ts";
+import { acquireInstanceLock, releaseInstanceLock } from "./daemon/instance-lock.ts";
+import { cmdDaemon, isDaemonMode } from "./daemon/cli.ts";
+import { prepareDaemonLogFiles } from "./daemon/logs.ts";
+import { resolvePlatform } from "./daemon/service.ts";
 
 const CORE_VERSION = "0.0.2";
 
 const HELP = `matrix-core（Matrix-Core）v${CORE_VERSION}
+别名：neo-core-serve
 
 用法：
   matrix-core serve [--cwd DIR] [--resume ID] [--mode MODE] [--tier TIER]
                     [--port N] [--stdio] [--dev-auth] [--token-file PATH]
-  matrix-core hub [--cwd DIR] [--port N] [--dev-auth] [--token-file PATH]
+  matrix-core hub [--cwd DIR] [--port N] [--dev-auth] [--token-file PATH] [--daemon]
+  matrix-core daemon install|uninstall|status|start|stop|restart|logs
+                    [--port N] [--cwd DIR]
   matrix-core status
   matrix-core stop
   matrix-core doctor
@@ -34,6 +45,8 @@ const HELP = `matrix-core（Matrix-Core）v${CORE_VERSION}
 说明：
   serve 默认监听 127.0.0.1 的随机端口，写 ~/.neo/run/core.json；
   --stdio 用于测试/PTY（stdout 只出协议帧，日志走 stderr）。
+  hub 与 serve（非 stdio）互斥；第二次启动 hub 若已有实例，打印其 url 并以 0 退出。
+  daemon 安装用户级服务（macOS LaunchAgent / Linux systemd --user），登录后自启，默认不开 linger。
   MODE: ask | auto-edit | auto-all | plan；TIER: default | balanced | deep_reasoning | fast。
 `;
 
@@ -46,6 +59,7 @@ interface ServeArgs {
   stdio: boolean;
   devAuth: boolean;
   tokenFile: string;
+  daemon: boolean;
 }
 
 function parseServeArgs(argv: string[]): ServeArgs {
@@ -58,6 +72,7 @@ function parseServeArgs(argv: string[]): ServeArgs {
     stdio: false,
     devAuth: false,
     tokenFile: defaultTokenFile(),
+    daemon: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const v = argv[i] ?? "";
@@ -76,6 +91,7 @@ function parseServeArgs(argv: string[]): ServeArgs {
       case "--stdio": out.stdio = true; break;
       case "--dev-auth": out.devAuth = true; break;
       case "--token-file": out.tokenFile = resolve(next()); break;
+      case "--daemon": out.daemon = true; break;
       case "-h":
       case "--help": throw new Error("help");
       default:
@@ -86,8 +102,19 @@ function parseServeArgs(argv: string[]): ServeArgs {
   return out;
 }
 
+function prepareDaemonLogging(daemon: boolean): void {
+  if (!daemon) return;
+  if (resolvePlatform() !== "darwin") return;
+  prepareDaemonLogFiles();
+}
+
 async function cmdServe(argv: string[]): Promise<number> {
   const args = parseServeArgs(argv);
+  const daemon = isDaemonMode(args);
+  if (daemon && args.devAuth) {
+    process.stderr.write("matrix-core: daemon 模式禁用 --dev-auth\n");
+    return 2;
+  }
   const host = await createSessionHost({
     cwd: args.cwd,
     resume: args.resume,
@@ -110,10 +137,29 @@ async function cmdServe(argv: string[]): Promise<number> {
     };
     process.on("SIGINT", () => void shutdownStdio(130));
     process.on("SIGTERM", () => void shutdownStdio(0));
+    process.on("SIGHUP", () => {
+      if (daemon) return;
+      void shutdownStdio(129);
+    });
     return await runStdio(host, { coreVersion: CORE_VERSION });
   }
 
-  const token = loadOrCreateToken(args.tokenFile);
+  const lock = acquireInstanceLock("serve");
+  if (!lock.ok) {
+    const who = lock.owner.kind === "hub" ? "hub" : "serve";
+    process.stderr.write(
+      `matrix-core: 已有 ${who} 实例在运行（pid=${lock.owner.pid}${lock.url ? `，${lock.url}` : ""}）；serve 与 hub 互斥\n`,
+    );
+    try {
+      await host.close();
+    } catch {
+      /* ignore */
+    }
+    return 2;
+  }
+
+  prepareDaemonLogging(daemon);
+  const token = rotateToken(args.tokenFile);
   const ws = startWsServer({
     host,
     coreVersion: CORE_VERSION,
@@ -156,6 +202,7 @@ async function cmdServe(argv: string[]): Promise<number> {
     } catch {
       /* 清理失败不阻塞退出 */
     }
+    releaseInstanceLock(lock.dir);
     process.exit(code);
   };
   const onSignal = (code: number): void => {
@@ -163,6 +210,10 @@ async function cmdServe(argv: string[]): Promise<number> {
   };
   process.on("SIGINT", () => onSignal(130));
   process.on("SIGTERM", () => onSignal(0));
+  process.on("SIGHUP", () => {
+    if (daemon) return;
+    onSignal(129);
+  });
   process.on("uncaughtException", (error) => {
     process.stderr.write(`matrix-core: uncaught: ${error.message}\n`);
     void shutdown(1);
@@ -181,7 +232,27 @@ async function cmdServe(argv: string[]): Promise<number> {
 
 async function cmdHub(argv: string[]): Promise<number> {
   const args = parseServeArgs(argv);
-  const token = loadOrCreateToken(args.tokenFile);
+  const daemon = isDaemonMode(args);
+  if (daemon && args.devAuth) {
+    process.stderr.write("matrix-core: daemon 模式禁用 --dev-auth\n");
+    return 2;
+  }
+
+  const lock = acquireInstanceLock("hub");
+  if (!lock.ok) {
+    if (lock.owner.kind === "hub") {
+      const url = lock.url ?? "";
+      process.stdout.write(`matrix-core: already running${url ? ` at ${url}` : ""}\n`);
+      return 0;
+    }
+    process.stderr.write(
+      `matrix-core: 已有 serve 实例在运行（pid=${lock.owner.pid}${lock.url ? `，${lock.url}` : ""}）；serve 与 hub 互斥\n`,
+    );
+    return 2;
+  }
+
+  prepareDaemonLogging(daemon);
+  const token = rotateToken(args.tokenFile);
   const hub = startHub({
     port: args.port,
     token,
@@ -214,10 +285,15 @@ async function cmdHub(argv: string[]): Promise<number> {
     } catch {
       /* ignore */
     }
+    releaseInstanceLock(lock.dir);
     process.exit(code);
   };
   process.on("SIGINT", () => void shutdown(130));
   process.on("SIGTERM", () => void shutdown(0));
+  process.on("SIGHUP", () => {
+    if (daemon) return;
+    void shutdown(129);
+  });
   process.on("uncaughtException", (error) => {
     process.stderr.write(`matrix-core: uncaught: ${error.message}\n`);
     void shutdown(1);
@@ -244,8 +320,8 @@ function cmdStatus(): number {
     try {
       process.kill(info.pid, 0);
       alive = true;
-    } catch {
-      alive = false;
+    } catch (e) {
+      alive = (e as NodeJS.ErrnoException).code === "EPERM";
     }
   }
   process.stdout.write(`${JSON.stringify({ ...info, alive }, null, 2)}\n`);
@@ -310,6 +386,8 @@ async function main(argv: string[]): Promise<number> {
         return await cmdServe(rest);
       case "hub":
         return await cmdHub(rest);
+      case "daemon":
+        return await cmdDaemon(rest);
       case "status":
         return cmdStatus();
       case "stop":
