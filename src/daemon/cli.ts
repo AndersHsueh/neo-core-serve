@@ -4,6 +4,8 @@
  * 与顶层 status/stop 协调：发现文件仍是 ~/.neo/run/core.json；
  * 未安装用户服务时，daemon stop 回退为向 core.json 中的 pid 发 SIGTERM。
  */
+import { realpathSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { defaultTokenFile, runFile } from "../serve/auth.ts";
 import {
   createDefaultRunner,
@@ -38,21 +40,25 @@ function parseDaemonFlags(argv: string[]): { port: number; cwd: string | null } 
   const out = { port: 0, cwd: null as string | null };
   for (let i = 0; i < argv.length; i += 1) {
     const v = argv[i] ?? "";
-    const next = (): string => argv[++i] ?? "";
+    const next = (): string => {
+      const value = argv[++i];
+      if (!value || value.startsWith("--")) throw new Error(`${v} 缺少参数`);
+      return value;
+    };
     if (v === "--port") out.port = Number(next());
     else if (v === "--cwd") out.cwd = next();
     else if (v === "-h" || v === "--help") throw new Error("help");
-    else if (v.startsWith("-")) throw new Error(`未知参数: ${v}`);
+    else throw new Error(`未知参数: ${v}`);
   }
-  if (!Number.isFinite(out.port) || out.port < 0) throw new Error(`非法 --port: ${out.port}`);
+  if (!Number.isInteger(out.port) || out.port < 0 || out.port > 65535) throw new Error(`非法 --port: ${out.port}`);
   return out;
 }
 
 function specFrom(flags: { port: number; cwd: string | null }): ServiceSpec {
-  return defaultSpec({
-    port: flags.port,
-    ...(flags.cwd ? { cwd: flags.cwd } : {}),
-  });
+  const spec = defaultSpec({ port: flags.port });
+  const cwd = realpathSync(resolve(flags.cwd ?? spec.cwd));
+  if (!statSync(cwd).isDirectory()) throw new Error(`--cwd 不是目录: ${cwd}`);
+  return { ...spec, cwd };
 }
 
 function writeOut(text: string): void {
@@ -95,6 +101,11 @@ export async function cmdDaemon(argv: string[]): Promise<number> {
       case "uninstall": {
         const spec = defaultSpec();
         const result = await uninstallService(spec, runner);
+        if (result.code !== 0) {
+          writeErr(result.stderr || `matrix-core: daemon uninstall 失败（exit ${result.code}）`);
+          if (result.stdout) writeOut(result.stdout);
+          return 1;
+        }
         writeOut(`matrix-core: 已卸载 ${result.file}`);
         if (result.stdout.trim()) writeOut(result.stdout.trim());
         if (result.stderr.trim()) writeErr(result.stderr.trim());
@@ -157,6 +168,7 @@ export async function cmdDaemon(argv: string[]): Promise<number> {
           manager: (mgr.manager?.stdout || mgr.manager?.stderr || "").trim() || null,
         };
         writeOut(JSON.stringify(payload, null, 2));
+        if (mgr.manager && mgr.manager.code !== 0) return 1;
         return run.alive || mgr.installed ? 0 : 1;
       }
       case "logs": {

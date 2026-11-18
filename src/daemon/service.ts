@@ -4,7 +4,9 @@
  * 测试通过 MATRIX_CORE_PLATFORM 与 MATRIX_CORE_SERVICE_BINDIR（假执行器目录）注入，
  * 绝不在测试里调用本机真实的 launchctl/systemctl。
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { inspectTarget, writeManagedFile, removeManagedFile, MANAGED_MARKER } from "./managed-file.ts";
+export { MANAGED_MARKER } from "./managed-file.ts";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { coreLogsDir, runFile } from "../core/paths.ts";
@@ -129,22 +131,28 @@ ${argXml}
 }
 
 export function renderSystemdUnit(spec: ServiceSpec): string {
+  // ExecStart is argv (C escapes, %% and $$); Environment is assignment
+  // words (C escapes, %% but NO dollar expansion); WorkingDirectory is a
+  // scalar path (raw quotes/backslashes, %% only). Never mix the grammars.
   const exec = [spec.bunPath, spec.entryPath, "hub", "--port", String(spec.port), "--cwd", spec.cwd]
-    .map(escapeUnitArg)
+    .map(execArg)
     .join(" ");
+  const workdir = scalarPath(spec.cwd);
+  const pathEnv = unitValue(`PATH=${spec.pathEnv}`, "Environment=PATH");
+  const homeEnv = unitValue(`HOME=${spec.home}`, "Environment=HOME");
   return `[Unit]
 Description=neo-core-serve (Matrix-Core Hub)
 After=default.target
 
 [Service]
 Type=simple
-WorkingDirectory=${spec.cwd}
+WorkingDirectory=${workdir}
 ExecStart=${exec}
 Restart=on-failure
 TimeoutStopSec=${EXIT_TIMEOUT_SEC}
 KillMode=control-group
-Environment=PATH=${spec.pathEnv}
-Environment=HOME=${spec.home}
+Environment=${pathEnv}
+Environment=${homeEnv}
 Environment=MATRIX_CORE_DAEMON=1
 StandardOutput=journal
 StandardError=journal
@@ -154,9 +162,50 @@ WantedBy=default.target
 `;
 }
 
-function escapeUnitArg(s: string): string {
-  if (/[\s"\\]/.test(s)) return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-  return s;
+/** 拒绝控制字符：换行/回车等会让 unit 文件多出指令（配置注入）。 */
+function assertNoControlChars(value: string, field: string): void {
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`systemd ${field} 含控制字符，拒绝生成 unit`);
+  }
+}
+
+/** C 风格转义（systemd 对引号内/外的反斜杠转义规则一致）。 */
+function cEscape(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/** 禁用 systemd 的 `%` specifier 与 `$` 环境变量展开。 */
+function literalize(s: string): string {
+  return s.replace(/%/g, "%%").replaceAll("$", () => "$$");
+}
+
+/** ExecStart 的一个 argv：需要时整项加引号；空白/引号/反斜杠/`%`/`$` 都安全。 */
+function execArg(s: string): string {
+  assertNoControlChars(s, "ExecStart");
+  const body = literalize(cEscape(s));
+  return /[\s'"\\%$]/.test(s) ? `"${body}"` : body;
+}
+
+/** Environment assignment words: C quoting and specifiers, no dollar expansion. */
+function unitValue(s: string, field: string): string {
+  assertNoControlChars(s, field);
+  const body = cEscape(s).replaceAll("%", "%%");
+  return /[\s'"\\]/.test(s) ? `"${body}"` : body;
+}
+
+function scalarPath(path: string): string {
+  assertNoControlChars(path, "WorkingDirectory");
+  // The unit reader strips trailing whitespace and joins trailing backslashes.
+  // Those rare pathnames have no unambiguous scalar representation: reject.
+  if (!path.startsWith("/") || /[\s\\]$/.test(path)) throw new Error("WorkingDirectory 必须是可无损表示的绝对路径");
+  return path.replaceAll("%", "%%");
+}
+
+export function renderManagedContent(spec: ServiceSpec): string {
+  const body = spec.platform === "darwin" ? renderLaunchAgentPlist(spec) : renderSystemdUnit(spec);
+  // XML declaration must remain the first bytes of a plist.
+  return spec.platform === "darwin" ? `${body}<!-- ${MANAGED_MARKER} -->\n` : `# ${MANAGED_MARKER}\n${body}`;
 }
 
 function prepareLogPaths(spec: ServiceSpec): { stdout: string; stderr: string } {
@@ -190,11 +239,6 @@ export function createDefaultRunner(env: NodeJS.ProcessEnv = process.env): Servi
   };
 }
 
-function writeFile0600(file: string, content: string): void {
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  writeFileSync(file, content, { encoding: "utf8", mode: 0o600 });
-}
-
 function uid(): number {
   return typeof process.getuid === "function" ? process.getuid() : 0;
 }
@@ -209,12 +253,16 @@ export async function installService(
     const env = { ...process.env, HOME: spec.home, NEO_HOME: join(spec.home, ".neo") } as NodeJS.ProcessEnv;
     prepareDaemonLogFiles(env);
     const file = launchAgentPath(spec.home);
-    writeFile0600(file, renderLaunchAgentPlist(spec));
+    const check = inspectTarget(file);
+    if (!check.ok) return { code: 1, stdout: "", stderr: `matrix-core: ${check.reason}\n`, file };
+    writeManagedFile(file, renderManagedContent(spec));
     const result = await runner.run("launchctl", ["bootstrap", `gui/${uid()}`, file]);
     return { ...result, file };
   }
   const file = systemdUnitPath(spec.home);
-  writeFile0600(file, renderSystemdUnit(spec));
+  const check = inspectTarget(file);
+  if (!check.ok) return { code: 1, stdout: "", stderr: `matrix-core: ${check.reason}\n`, file };
+  writeManagedFile(file, renderManagedContent(spec));
   const userDir = dirname(file);
   // enable --now：登录后自启 + 立刻启动。默认不开 linger。
   const result = await runner.run("systemctl", ["--user", "enable", "--now", SYSTEMD_UNIT]);
@@ -225,24 +273,20 @@ export async function uninstallService(
   spec: ServiceSpec,
   runner: ServiceRunner = createDefaultRunner(),
 ): Promise<ServiceRunResult & { file: string }> {
-  if (spec.platform === "darwin") {
-    const file = launchAgentPath(spec.home);
-    const result = await runner.run("launchctl", ["bootout", `gui/${uid()}/${LAUNCHD_LABEL}`]);
-    try {
-      rmSync(file, { force: true });
-    } catch {
-      /* ignore */
-    }
-    return { ...result, file };
+  const file = spec.platform === "darwin" ? launchAgentPath(spec.home) : systemdUnitPath(spec.home);
+  // 先校验所有权：symlink/外来文件一律拒绝，且不调用 manager。
+  const check = inspectTarget(file);
+  if (!check.ok) {
+    return { code: 1, stdout: "", stderr: `matrix-core: ${check.reason}\n`, file };
   }
-  const file = systemdUnitPath(spec.home);
-  const stop = await runner.run("systemctl", ["--user", "disable", "--now", SYSTEMD_UNIT]);
-  try {
-    rmSync(file, { force: true });
-  } catch {
-    /* ignore */
-  }
-  return { ...stop, file };
+  const result = spec.platform === "darwin"
+    ? await runner.run("launchctl", ["bootout", `gui/${uid()}/${LAUNCHD_LABEL}`])
+    : await runner.run("systemctl", ["--user", "disable", "--now", SYSTEMD_UNIT]);
+  // manager 失败时不删管理文件（服务可能仍在跑，删文件会让状态不一致）。
+  if (result.code !== 0) return { ...result, file };
+  const removed = removeManagedFile(file);
+  if (!removed.ok) return { code: 1, stdout: result.stdout, stderr: `matrix-core: ${removed.reason}\n`, file };
+  return { ...result, file };
 }
 
 export async function startService(
@@ -257,7 +301,8 @@ export async function startService(
     const boot = await runner.run("launchctl", ["bootstrap", `gui/${uid()}`, file]);
     // 已加载时 bootstrap 可能非 0，继续 kickstart。
     const kick = await runner.run("launchctl", ["kickstart", `gui/${uid()}/${LAUNCHD_LABEL}`]);
-    return { code: kick.code === 0 ? 0 : boot.code, stdout: boot.stdout + kick.stdout, stderr: boot.stderr + kick.stderr };
+    // kickstart 失败就是启动失败，不能被 bootstrap 的成功掩盖。
+    return { code: kick.code, stdout: boot.stdout + kick.stdout, stderr: boot.stderr + kick.stderr };
   }
   const file = systemdUnitPath(spec.home);
   if (!existsSync(file)) {

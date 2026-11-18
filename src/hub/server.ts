@@ -13,7 +13,7 @@ import { CORE_CAPABILITIES, err, user as localUser } from "../serve/dispatch.ts"
 import { tokenFromProtocols, tokenMatches } from "../serve/auth.ts";
 import { EventBatcher } from "../serve/batcher.ts";
 import { decodeFrame, frameTooLarge, tooLargeResult } from "../serve/frames.ts";
-import { WorkerClient } from "./worker.ts";
+import { WorkerClient, trackedWorkerGroups } from "./worker.ts";
 import { sessionsDir } from "../core/paths.ts";
 import { loadConfig } from "../core/config.ts";
 import { buildSettingsView } from "../core/session-host.ts";
@@ -56,6 +56,8 @@ export function startHub(opts: HubOptions): HubHandle {
   const conns = new Map<ServerWebSocket<{ id: string }>, Conn>();
   const workers = new Map<string, Entry>();
   const inflightSpawns = new Map<string, Promise<Entry | null>>();
+  /** 所有已 spawn 但还没进 workers 表的 client（ready 前 / create 中）。 */
+  const pendingClients = new Set<Promise<WorkerClient>>();
   const log = (line: string): void => {
     process.stderr.write(`${line}\n`);
   };
@@ -176,6 +178,7 @@ export function startHub(opts: HubOptions): HubHandle {
   };
 
   const ensureWorker = async (sessionId: string): Promise<Entry | null> => {
+    if (!accepting) return null;
     const existing = workers.get(sessionId);
     if (existing?.client.alive()) return existing;
     const inflight = inflightSpawns.get(sessionId);
@@ -187,7 +190,8 @@ export function startHub(opts: HubOptions): HubHandle {
         workers.delete(sessionId);
       }
       try {
-        const client = await WorkerClient.spawn({ cwd: sessionCwd(sessionId), resume: sessionId });
+        const client = await spawnTracked({ cwd: sessionCwd(sessionId), resume: sessionId });
+        if (!client) return null;
         return register(client);
       } catch (error) {
         log(`[hub] resume ${sessionId} failed: ${(error as Error).message}`);
@@ -200,7 +204,23 @@ export function startHub(opts: HubOptions): HubHandle {
     return job;
   };
 
-  const register = (client: WorkerClient): Entry => {
+  /**
+   * spawn 并登记到 pendingClients；关闭态下拒绝启动。
+   * 返回 null 表示「已进入关闭态，未启动」。
+   */
+  const spawnTracked = async (opts: { cwd: string; resume: string | null }): Promise<WorkerClient | null> => {
+    if (!accepting) return null;
+    const promise = WorkerClient.spawn(opts);
+    pendingClients.add(promise);
+    try {
+      const client = await promise;
+      if (!accepting) { await client.stopAndWait(); return null; }
+      return client;
+    } finally { pendingClients.delete(promise); }
+  };
+
+  const register = (client: WorkerClient): Entry | null => {
+    if (!accepting || !client.alive()) { client.stop(); return null; }
     const entry: Entry = {
       client,
       owner: null,
@@ -232,9 +252,11 @@ export function startHub(opts: HubOptions): HubHandle {
     return entry;
   };
 
-  const createWorker = async (cwd: string, title?: string): Promise<Entry> => {
-    const client = await WorkerClient.spawn({ cwd, resume: null });
+  const createWorker = async (cwd: string, title?: string): Promise<Entry | null> => {
+    const client = await spawnTracked({ cwd, resume: null });
+    if (!client) return null;
     const entry = register(client);
+    if (!entry) return null;
     if (title) {
       try {
         await client.request({ type: "session.rename", title });
@@ -242,7 +264,7 @@ export function startHub(opts: HubOptions): HubHandle {
         /* 标题失败不影响创建 */
       }
     }
-    return entry;
+    return accepting ? entry : null;
   };
 
   const server = Bun.serve<{ id: string }>({
@@ -342,6 +364,10 @@ export function startHub(opts: HubOptions): HubHandle {
 
   async function dispatch(ws: ServerWebSocket<{ id: string }>, conn: Conn, id: string, command: ClientCommand): Promise<void> {
     try {
+      // 关闭屏障：进入关闭态后，旧连接发来的任何新工作都拒绝（ping 仍可应答）。
+      if (!accepting && command.type !== "ping") {
+        return fail(ws, id, "conflict", "Hub 正在关闭，拒绝新的请求", false);
+      }
       switch (command.type) {
         case "ping":
           send(ws, { v: PROTOCOL_VERSION, kind: "pong" });
@@ -352,6 +378,7 @@ export function startHub(opts: HubOptions): HubHandle {
         case "session.create": {
           const cwd = command.cwd ?? opts.defaultCwd;
           const entry = await createWorker(cwd, command.title);
+          if (!accepting || !entry) return fail(ws, id, "conflict", "Hub 正在关闭，拒绝创建会话", false);
           reply(ws, id, true, { sessionId: entry.client.sessionId });
           return;
         }
@@ -361,6 +388,7 @@ export function startHub(opts: HubOptions): HubHandle {
           if (conn.sessionId && conn.sessionId !== sid) return fail(ws, id, "conflict", "当前连接已绑定其他会话");
           if (!existsSync(join(sessionsDir(), `${sid}.json`))) return fail(ws, id, "not_found", `会话 ${sid} 不存在`);
           const entry = await ensureWorker(sid);
+          if (!accepting) return fail(ws, id, "conflict", "Hub 正在关闭");
           if (!entry) return fail(ws, id, "not_found", `会话 ${sid} 无法打开`);
           if (entry.owner && entry.owner !== ws) return fail(ws, id, "conflict", "会话已被其他客户端 attach");
           // 先占位再 await，避免并发 attach 两个都看到 owner=null。
@@ -368,6 +396,7 @@ export function startHub(opts: HubOptions): HubHandle {
           conn.sessionId = sid;
           try {
             const snapshot = await entry.client.attach(command.lastSeq, command.epoch);
+            if (!accepting) return fail(ws, id, "conflict", "Hub 正在关闭");
             reply(ws, id, true, { role: "owner" });
             conn.batcher.enqueue(snapshot);
           } catch (error) {
@@ -447,6 +476,12 @@ export function startHub(opts: HubOptions): HubHandle {
 
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+  /** 等一组 client 全部退出（或超时）；已退出的立刻返回。 */
+  const waitAllExit = async (clients: WorkerClient[], timeoutMs: number): Promise<void> => {
+    if (clients.length === 0 || timeoutMs <= 0) return;
+    await Promise.race([Promise.all(clients.map((c) => c.waitExit(timeoutMs))), sleep(timeoutMs)]);
+  };
+
   return {
     url: `ws://127.0.0.1:${server.port}/ws`,
     async stop() {
@@ -455,6 +490,18 @@ export function startHub(opts: HubOptions): HubHandle {
       accepting = false;
       // onExit 会从 workers 删除条目；整个清理序列必须持有原始进程组引用。
       const stoppingWorkers = [...workers];
+      // 已 spawn 但还没注册的 worker（create 中 / ready 前）也要收口。
+      const inflight = [...pendingClients];
+      const inflightClients = await Promise.race([
+        Promise.all(inflight.map((p) => p.catch(() => null))),
+        sleep(Math.min(1_500, remain())).then(() => [] as (WorkerClient | null)[]),
+      ]);
+      const extraClients = inflightClients.filter((c): c is WorkerClient => c !== null);
+      // 进程组表兜底：worker 意外退出后 onExit 已把它从 workers 删掉，
+      // 但它的 PGID 仍可能带着 shell 孙进程 —— 必须一起回收。
+      const known = new Set<WorkerClient>([...stoppingWorkers.map(([, e]) => e.client), ...extraClients]);
+      const orphanGroups = trackedWorkerGroups().filter((c) => !known.has(c));
+      const allClients = [...known, ...orphanGroups];
 
       // 给所有已 attach 的客户端发 turn.aborted{shutdown}，并立刻 flush 合批队列。
       for (const [sessionId, entry] of stoppingWorkers) {
@@ -478,46 +525,41 @@ export function startHub(opts: HubOptions): HubHandle {
       }
 
       // 先关 worker stdin（serve --stdio 在 EOF 后走 host.close → turn.aborted{shutdown}）。
-      for (const [, entry] of stoppingWorkers) {
-        entry.client.closeStdin();
+      for (const client of allClients) {
+        client.closeStdin();
       }
-      const afterStdin = Math.min(2_000, remain());
-      if (afterStdin > 0) {
-        await Promise.race([
-          Promise.all(stoppingWorkers.map(([, e]) => e.client.waitExit(afterStdin))),
-          sleep(afterStdin),
-        ]);
-      }
+      await waitAllExit(allClients, Math.min(2_000, remain()));
 
       // SIGTERM 进程组（含 shell 孙进程）。
-      for (const [, entry] of stoppingWorkers) {
-        entry.client.signalGroup("SIGTERM");
+      for (const client of allClients) {
+        client.signalGroup("SIGTERM");
       }
-      const afterTerm = Math.min(5_000, remain());
-      if (afterTerm > 0) {
-        await Promise.race([
-          Promise.all(stoppingWorkers.map(([, e]) => e.client.waitExit(afterTerm))),
-          sleep(afterTerm),
-        ]);
-      }
+      await waitAllExit(allClients, Math.min(5_000, remain()));
 
       // SIGKILL 兜底。
       for (const [, entry] of stoppingWorkers) {
         entry.unsub();
         entry.unsubExit();
-        entry.client.signalGroup("SIGKILL");
       }
-      const afterKill = Math.min(1_500, remain());
-      if (afterKill > 0) {
-        await Promise.race([
-          Promise.all(stoppingWorkers.map(([, e]) => e.client.waitExit(afterKill))),
-          sleep(afterKill),
-        ]);
+      for (const client of allClients) {
+        client.signalGroup("SIGKILL");
       }
+      await waitAllExit(allClients, Math.min(1_500, remain()));
+
+      // Spawn/ready rejection and resume finally blocks must also settle before
+      // the stop barrier returns. No new spawn can enter after accepting=false.
+      await Promise.race([
+        Promise.allSettled([...pendingClients, ...inflightSpawns.values()]),
+        sleep(remain()),
+      ]);
+
+      // 组引用到此才释放（清理完成前不丢 PGID）。
+      for (const client of allClients) client.untrack();
 
       for (const [, conn] of conns) conn.batcher.close();
       conns.clear();
       workers.clear();
+      pendingClients.clear();
       await Promise.race([
         Promise.resolve(server.stop(true)).catch(() => undefined),
         sleep(Math.min(150, remain() || 150)),

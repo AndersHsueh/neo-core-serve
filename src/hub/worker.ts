@@ -7,18 +7,11 @@ import { join } from "node:path";
 import { decodeServerText } from "../protocol/guards.ts";
 import type { ClientCommand, ServerMessage } from "../protocol/types.ts";
 
-/** 向独立进程组发信号；失败则回退到 pid 本身。 */
-export function killProcessGroup(pid: number, signal: NodeJS.Signals | number): void {
-  if (!Number.isInteger(pid) || pid <= 0) return;
-  try {
-    process.kill(-pid, signal);
-  } catch {
-    try {
-      process.kill(pid, signal);
-    } catch {
-      /* gone */
-    }
-  }
+/** Never fall back to a positive PID: it may belong to an unrelated generation. */
+export function killProcessGroup(pid: number, signal: NodeJS.Signals | number): "sent" | "gone" | "failed" {
+  if (!Number.isInteger(pid) || pid <= 0) return "gone";
+  try { process.kill(-pid, signal); return "sent"; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH" ? "gone" : "failed"; }
 }
 
 export interface WorkerOptions {
@@ -36,6 +29,18 @@ type Pending = {
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 };
+
+/**
+ * 活着的 worker 进程组表（key = worker pid，即组 id）。
+ * worker 意外退出后仍保留条目：Hub 停止时必须回收整组（含 shell 孙进程），
+ * 不能因为 onExit 把 worker 从会话表删掉就丢掉 PGID 引用。
+ */
+const liveGroups = new Map<number, WorkerClient>();
+
+/** 当前仍被追踪的 worker 进程组（含已退出但组可能未清空的）。 */
+export function trackedWorkerGroups(): WorkerClient[] {
+  return [...liveGroups.values()];
+}
 
 export class WorkerClient {
   sessionId = "";
@@ -57,6 +62,12 @@ export class WorkerClient {
   private readyResolve!: () => void;
   private readyReject!: (error: Error) => void;
 
+  private stopping = false;
+  private exitNotified = false;
+  private groupDone = false;
+  private termSent = false;
+  private cleanupPromise: Promise<void> | null = null;
+
   private constructor(proc: ReturnType<typeof Bun.spawn>, cwd: string) {
     this.proc = proc;
     this.ready = new Promise<void>((resolve, reject) => {
@@ -66,6 +77,7 @@ export class WorkerClient {
     this.exitPromise = new Promise<void>((resolve) => {
       this.exitResolve = resolve;
     });
+    void proc.exited.then(() => this.finishExit());
     void this.readLoop();
     void this.stderrLoop(cwd);
     this.readyTimer = setTimeout(() => this.readyReject(new Error("worker ready timeout")), 15000);
@@ -88,18 +100,31 @@ export class WorkerClient {
       detached: true,
     } as Parameters<typeof Bun.spawn>[1]);
     const client = new WorkerClient(proc, opts.cwd);
+    // 立即登记到进程组表：ready 之前（或 ready 失败）也必须能被 shutdown 收口。
+    client.track();
     try {
       await client.ready;
       if (!client.sessionId) throw new Error("worker ready without sessionId");
       return client;
     } catch (error) {
-      try {
-        proc.kill(9);
-      } catch {
-        /* gone */
-      }
+      // 启动失败：回收整组（ready 前崩溃的 worker 也可能已 fork 出 shell 孙进程）。
+      await client.cleanupGroup();
       throw error;
     }
+  }
+
+  /** 登记进进程组表（Hub 用它保证「spawn 过就一定被追踪」）。 */
+  private tracked = false;
+  track(): void {
+    if (this.tracked) return;
+    this.tracked = true;
+    liveGroups.set(this.proc.pid, this);
+  }
+
+  untrack(): void {
+    if (!this.tracked) return;
+    this.tracked = false;
+    if (liveGroups.get(this.proc.pid) === this) liveGroups.delete(this.proc.pid);
   }
 
   onEvent(cb: (frame: EventFrame) => void): () => void {
@@ -117,7 +142,7 @@ export class WorkerClient {
   }
 
   async request(command: ClientCommand): Promise<unknown> {
-    if (this.exited) throw new Error("worker exited");
+    if (!this.alive()) throw new Error("worker exited");
     await this.ready;
     const id = `w${++this.nextId}`;
     const dataPromise = new Promise<unknown>((resolve, reject) => {
@@ -132,7 +157,7 @@ export class WorkerClient {
   }
 
   async attach(lastSeq?: number, epoch?: string): Promise<SnapshotFrame> {
-    if (this.exited) throw new Error("worker exited");
+    if (!this.alive()) throw new Error("worker exited");
     await this.ready;
     const id = `w${++this.nextId}`;
     const snapshotPromise = new Promise<SnapshotFrame>((resolve) => {
@@ -167,7 +192,11 @@ export class WorkerClient {
   }
 
   signalGroup(signal: NodeJS.Signals | number): void {
-    killProcessGroup(this.proc.pid, signal);
+    if (this.groupDone || ((signal === "SIGTERM" || signal === 15) && this.termSent)) return;
+    const result = killProcessGroup(this.proc.pid, signal);
+    if (result === "failed") throw new Error(`worker group ${this.proc.pid}: ${signal} failed`);
+    if (signal === "SIGTERM" || signal === 15) this.termSent = true;
+    if (result === "gone" || signal === "SIGKILL" || signal === 9) this.groupDone = true;
   }
 
   async waitExit(timeoutMs: number): Promise<boolean> {
@@ -180,28 +209,32 @@ export class WorkerClient {
 
   async stopAndWait(timeoutMs = 2000): Promise<void> {
     this.stop();
+    await this.cleanupGroup();
     await this.waitExit(timeoutMs);
   }
 
   stop(): void {
-    if (!this.exited) {
-      this.exited = true;
-      this.closeStdin();
-      this.signalGroup("SIGTERM");
-      setTimeout(() => this.signalGroup("SIGKILL"), 500);
-      for (const [, p] of this.pending) {
-        clearTimeout(p.timer);
-        p.reject(new Error("worker stopped"));
-      }
-      this.pending.clear();
-      return;
-    }
-    this.signalGroup("SIGKILL");
+    if (this.stopping) return;
+    this.stopping = true;
+    this.closeStdin();
+    for (const [, p] of this.pending) { clearTimeout(p.timer); p.reject(new Error("worker stopped")); }
+    this.pending.clear();
+    void this.cleanupGroup().catch((e) => process.stderr.write(`[hub] cleanup: ${String(e)}\n`));
   }
 
-  alive(): boolean {
-    return !this.exited;
+  /** Keep the group reference through TERM/KILL, even when the leader has died. */
+  private cleanupGroup(): Promise<void> {
+    if (this.cleanupPromise) return this.cleanupPromise;
+    this.cleanupPromise = (async () => {
+      this.signalGroup("SIGTERM");
+      if (!this.groupDone) await new Promise<void>((r) => setTimeout(r, 500));
+      this.signalGroup("SIGKILL");
+      this.untrack();
+    })();
+    return this.cleanupPromise;
   }
+
+  alive(): boolean { return !this.exited && !this.stopping; }
 
   private write(text: string): void {
     try {
@@ -238,7 +271,14 @@ export class WorkerClient {
     } catch {
       /* exit */
     }
+    this.finishExit();
+  }
+
+  private finishExit(): void {
+    if (this.exitNotified) return;
+    this.exitNotified = true;
     this.exited = true;
+    if (this.readyTimer) { clearTimeout(this.readyTimer); this.readyTimer = null; }
     this.readyReject(new Error("worker exited before ready"));
     this.exitResolve?.();
     this.exitResolve = null;
@@ -249,6 +289,7 @@ export class WorkerClient {
     this.pending.clear();
     for (const cb of this.exitListeners) cb();
     this.exitListeners.clear();
+    void this.cleanupGroup().catch((e) => process.stderr.write(`[hub] cleanup: ${String(e)}\n`));
   }
 
   private handleLine(line: string): void {
