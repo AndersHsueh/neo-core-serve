@@ -72,6 +72,10 @@ export function resolveEnvConfig(raw: unknown): EnvConfig | undefined {
   if (typeof r["wiki_page"] === "boolean") out.wikiPage = r["wiki_page"];
   const dir = r["dir"];
   if (typeof dir === "string" && dir.trim() !== "") out.dir = dir.trim();
+  if (typeof r["models_probe_timeout_ms"] === "number" && Number.isFinite(r["models_probe_timeout_ms"])) {
+    // 与 modelWindows.modelsProbeTimeoutMs 同一夹取范围。
+    out.modelsProbeTimeoutMs = Math.min(60_000, Math.max(250, Math.floor(r["models_probe_timeout_ms"])));
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -179,6 +183,10 @@ export function normalizeBaseUrl(u: string): string {
   return u.replace(/\/+$/, "");
 }
 
+
+function boolOrUndef(v: unknown): boolean | undefined {
+  return typeof v === "boolean" ? v : undefined;
+}
 /* ------------------------------------------------------------------ */
 /* provider 解析                                                       */
 /* ------------------------------------------------------------------ */
@@ -243,6 +251,10 @@ export function parseProviders(raw: unknown): ProviderConfig[] {
       temperature: numOrNull(p["temperature"]),
       contextWindow: numOrNull(p["context_window"]),
       outputProbe: resolveOutputProbe(p["probe_max_output_tokens"]),
+      vision: boolOrUndef(p["vision"]),
+      tools: boolOrUndef(p["tools"]),
+      reasoning: boolOrUndef(p["reasoning"]),
+      maxOutputTokens: numOrNull(p["max_output_tokens"]),
     };
   });
 }
@@ -271,6 +283,10 @@ export function providerFromLegacy(raw: Raw): ProviderConfig | null {
     temperature: numOrNull(raw["temperature"]),
     contextWindow: numOrNull(raw["context_window"]),
     outputProbe: resolveOutputProbe(raw["probe_max_output_tokens"]),
+    vision: boolOrUndef(raw["vision"]),
+    tools: boolOrUndef(raw["tools"]),
+    reasoning: boolOrUndef(raw["reasoning"]),
+    maxOutputTokens: numOrNull(raw["max_output_tokens"]),
   };
 }
 

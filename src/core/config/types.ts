@@ -130,9 +130,17 @@ export interface ProviderConfig {
   contextWindow: number | null;
   /**
    * 输出上限的主动探测配置（K03b-mpa）。undefined = 未配置 = 关闭。
-   * 本批只做解析；真正发探测请求是后续 K05 的事。
    */
   outputProbe?: OutputProbeSettings;
+  /**
+   * 手写能力声明。true/false 是用户判断，探测只补空缺，绝不覆盖手写值（含 false）。
+   * undefined = 未声明。
+   */
+  vision?: boolean;
+  tools?: boolean;
+  reasoning?: boolean;
+  /** 手写的模型单次输出上限。与请求预算 maxTokens 无关。未填 = null。 */
+  maxOutputTokens?: number | null;
 }
 
 /** 档位 → 目标 {provider, model} 的绑定。跨供应商调度靠这个。 */

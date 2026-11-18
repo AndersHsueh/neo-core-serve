@@ -7,7 +7,7 @@
  *  2. tool_calls 以增量形式下发（delta.tool_calls 带 index），需按 index 拼接。
  *  3. SSE 以空行分隔事件，末条为 data: [DONE]。
  */
-import { DEFAULT_RETRY_CONFIG, type Config, type RetryConfig } from "./config.ts";
+import { DEFAULT_RETRY_CONFIG, isImplemented, type Config, type RetryConfig } from "./config.ts";
 import { LLMError, LLMTimeoutError } from "./llm/types.ts";
 import {
   OPAQUE_400_DOWNGRADE_FLOOR,
@@ -166,11 +166,12 @@ async function chatOnce(
   cfg: Config,
   messages: Message[],
   tools: ToolSpec[] = [],
+  respectLearned = true,
 ): Promise<StreamResult> {
   const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
     method: "POST",
     headers: authHeaders(cfg),
-    body: JSON.stringify(buildBody(cfg, messages, tools, false)),
+    body: JSON.stringify(buildBody(cfg, messages, tools, false, respectLearned)),
   });
   if (!res.ok) throw await describeError(res);
 
@@ -230,6 +231,36 @@ export async function chat(
       throw e;
     }
   }
+}
+
+/**
+ * 输出上限探测用的单次非流式请求：发送精确候选值，不被已学上限夹紧，也不走重试/降级。
+ */
+export async function rawChatOnce(
+  cfg: Config,
+  messages: Message[],
+  maxTokens: number,
+): Promise<StreamResult> {
+  return chatOnce({ ...cfg, maxTokens }, messages, [], false);
+}
+
+/**
+ * `/models` 探测请求（按协议优先级）。K05a 只给出已接入的 OpenAI 端点；
+ * Anthropic wire 在 K06a，本函数届时再扩展，不得把未接入协议静默当成 OpenAI。
+ */
+export function modelsRequests(
+  cfg: Config,
+): Array<{ proto: Config["providerType"]; url: string; headers: Record<string, string> }> {
+  // 未接入的协议不得按 OpenAI 形态去探 /models。
+  if (!isImplemented(cfg.providerType) || cfg.providerType !== "openai") return [];
+  const headers = authHeaders(cfg);
+  return [
+    {
+      proto: "openai",
+      url: `${cfg.baseUrl.replace(/\/$/, "")}/models`,
+      headers,
+    },
+  ];
 }
 
 /* ------------------------------------------------------------------ */
