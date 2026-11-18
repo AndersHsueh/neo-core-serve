@@ -22,7 +22,7 @@ const SCRIPT = join(ROOT, "scripts", "build-compat.py");
 const DTS = join(ROOT, "src", "compat", "v1.d.ts");
 const ENTRY = join(ROOT, "src", "core", "contextWindow.ts");
 
-const BUN = process.execPath; // 当前跑测试的 bun 二进制
+const BUN = process.env.NEO_COMPAT_BUILD_BUN ?? process.execPath; // pinned builder may differ from the runtime under test
 const BUN_VERSION = execFileSync(BUN, ["--version"], { encoding: "utf8" }).trim();
 
 const TMP_DIRS: string[] = [];
