@@ -5,7 +5,7 @@
  *  1. 第二个 hub 启动时返回已有 url，exit 0
  *  2. 陈旧锁可回收（pid 不存活）
  *  3. core.json / core.token 权限 0600，目录 0700
- *  4. SIGTERM hub 之后，worker 和孙进程不再写盘
+ *  4. SIGTERM hub 之后 worker 与孙进程的回收（已迁至 tests/e2e/hub-process-tree.test.ts）
  *  5. 临时 HOME 下 install 生成的 plist/unit 正确；uninstall 清理干净（假执行器）
  *  6. 重启后 token 与旧 token 不同
  *  7. daemon 模式下 --dev-auth 被拒绝
@@ -19,7 +19,6 @@ import { join } from "node:path";
 import {
   MAIN_ENTRY,
   TestEnv,
-  WsClient,
   coreSpawnEnv,
   serveStdioAvailable,
   sleep,
@@ -105,10 +104,8 @@ async function waitCoreJson(env: TestEnv, label: string): Promise<string> {
 describe.skipIf(!available)("daemon / 单实例 / 信号", () => {
   let env: TestEnv | null = null;
   let hub: HubCore | null = null;
-  const clients: WsClient[] = [];
 
   afterEach(async () => {
-    for (const client of clients.splice(0)) await client.close().catch(() => {});
     if (hub) {
       await hub.stop().catch(() => {});
       hub = null;
@@ -315,40 +312,11 @@ exit 0
     TIMEOUT,
   );
 
-  test(
-    "SIGTERM hub 之后，worker 和孙进程不再写盘",
-    async () => {
-      env = await TestEnv.create("daemon-sigterm-grand", { scenario: "shell-sleep" });
-      const marker = join(env.dirs.work, "should-not-appear.txt");
-      hub = await startHub({
-        dirs: env.dirs,
-        fake: env.fake,
-        env: { MATRIX_CORE_WORKER_ARGS: "--mode auto-all" },
-      });
-      const token = await hub.readToken();
-      const client = await WsClient.connect({ url: hub.url, token });
-      clients.push(client);
-      const created = await client.requestOk({ type: "session.create", cwd: env.dirs.work, title: "daemon-sigterm" });
-      const sessionId = String((created.data as { sessionId?: string } | undefined)?.sessionId ?? "");
-      expect(sessionId.length).toBeGreaterThan(0);
-      const attachMark = client.mark();
-      await client.requestOk({ type: "session.attach", sessionId }, { since: attachMark });
-      await client.awaitFrame((f) => f.kind === "snapshot", "hub snapshot", { since: attachMark, timeoutMs: 30000 });
-      const mark = client.mark();
-      await client.requestOk({ type: "turn.send", text: "跑一条慢命令", clientId: "daemon-sigterm" }, { since: mark });
-      // 等到 shell 工具已经启动。
-      await client.awaitFrame(
-        (f) => f.kind === "event" && (f.event as { type?: string }).type?.startsWith("tool.") === true,
-        "shell tool event",
-        { since: mark, timeoutMs: 20000 },
-      );
-      await sleep(400);
-      const code = await hub.stop();
-      expect([0, 130, 143, null, -1].includes(code) || typeof code === "number").toBe(true);
-      hub = null;
-      await sleep(7000);
-      expect(existsSync(marker)).toBe(false);
-    },
-    TIMEOUT,
-  );
+  // 说明：原先这里有一条「SIGTERM hub 之后，worker 和孙进程不再写盘」的用例，已删除。
+  // 它是**假阳性**：
+  //  1. 用 MATRIX_CORE_WORKER_ARGS=--mode auto-all 绕过审批，测的不是默认路径；
+  //  2. 只等一个 tool.* 事件就当作「shell 已启动」——任意 tool 事件都不等于进程已 spawn，
+  //     于是「孙进程没写 marker」既可能因为被回收，也可能因为进程压根没起来；
+  //  3. 用固定 sleep(400)/sleep(7000) 猜时序，没有 ready 握手，也没有观测 pid。
+  // 替代用例见 tests/e2e/hub-process-tree.test.ts（显式审批 + pid 文件 + ps 取证 + ready 握手）。
 });
