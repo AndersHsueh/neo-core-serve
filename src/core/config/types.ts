@@ -4,6 +4,7 @@
 import type { EnvConfig } from "../env/types.ts";
 import type { ShellConfig } from "../shell.ts";
 import type { WindowSource } from "../contextWindow.ts";
+import type { PromptSelectionConfig } from "../prompt/select.ts";
 import type { InboundPolicy, MailboxConfig } from "../mailbox/types.ts";
 /**
  * 已实现的 provider 协议类型。
@@ -254,6 +255,12 @@ export interface Config {
    * 测试场景下 cfg.memory 总有值；真启动路径下 loadConfig 必填默认。
    */
   memory: MemoryConfig;
+  /**
+   * 系统提示词三档选择（K08 / issue #20）。settings.json 顶层 `system_prompt` 段。
+   * 缺省按 DEFAULT_SELECTION_CONFIG；非法值回落默认，不报错。
+   * 本字段只影响 prompt 选档，不扩 compat 导出。
+   */
+  systemPrompt?: PromptSelectionConfig;
   /** 跨平台 shell 覆盖（v0.4.0 平台适配层；不填=自动探测）。 */
   shell?: ShellConfig;
   /** 环境探测/注入配置（v0.4.0；不填=默认开启、TTL 12h、注入+写 wiki 页）。 */

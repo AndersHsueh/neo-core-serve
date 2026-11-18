@@ -31,6 +31,7 @@ import {
   type ProviderType,
   type RetryConfig,
 } from "./types.ts";
+import { DEFAULT_SELECTION_CONFIG, TIER_ORDER, type PromptSelectionConfig } from "../prompt/select.ts";
 
 export type Raw = Record<string, unknown>;
 /** paste.* 解析：settings.json > 内置默认（3 行 / 300 字符 / 8MB）。 */
@@ -358,6 +359,33 @@ function clampInt(v: unknown, min: number, max: number): number | null {
  *
  * 越界值夹紧：max_attempts 1–8、start ≥256、cap < start 时以 start 为准。
  */
+
+/**
+ * 解析 settings.system_prompt（K08 / issue #20）。非法值一律回落默认，不报错：
+ * 选档是增强项，配错不该阻止启动。未知键忽略。
+ */
+export function resolveSystemPromptConfig(raw: unknown): PromptSelectionConfig {
+  const out: PromptSelectionConfig = { ...DEFAULT_SELECTION_CONFIG };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return out;
+  const r = raw as Raw;
+  const mode = r["selection_mode"];
+  if (mode === "budget-first" || mode === "context-gated") out.selectionMode = mode;
+  const ratio = r["system_budget_ratio"];
+  if (typeof ratio === "number" && Number.isFinite(ratio)) {
+    out.systemBudgetRatio = Math.min(0.3, Math.max(0.05, ratio));
+  }
+  const maxTier = r["max_tier"];
+  if (typeof maxTier === "string" && (TIER_ORDER as readonly string[]).includes(maxTier)) {
+    out.maxTier = maxTier as PromptSelectionConfig["maxTier"];
+  }
+  const unknown = r["unknown_window_budget"];
+  if (typeof unknown === "number" && Number.isFinite(unknown) && unknown > 0) {
+    out.unknownWindowBudget = Math.floor(unknown);
+  }
+  if (typeof r["trust_known_window"] === "boolean") out.trustKnownWindow = r["trust_known_window"];
+  return out;
+}
+
 export function resolveOutputProbe(raw: unknown): OutputProbeSettings | undefined {
   if (raw === undefined) return undefined;
   if (typeof raw === "boolean") return { ...DEFAULT_OUTPUT_PROBE, enabled: raw };

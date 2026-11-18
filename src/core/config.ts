@@ -53,6 +53,7 @@ import {
   resolveMailboxSettings,
   resolveMemoryConfig,
   resolveModelFallback,
+  resolveSystemPromptConfig,
   resolveOutputProbe,
   resolvePasteConfig,
   resolveRetryConfig,
@@ -81,6 +82,7 @@ export {
   normalizeBaseUrl,
   parseSkillsExtraPaths,
   resolveModelFallback,
+  resolveSystemPromptConfig,
   resolveOutputProbe,
   resolveRetryConfig,
   parseFallbackTarget,
@@ -314,6 +316,7 @@ export function loadConfig(overrides: Partial<Config> = {}, options: LoadConfigO
     mailbox: resolveMailboxSettings(raw),
     crossSessionInbound: resolveInboundPolicy(raw["cross_session_inbound"]),
     modelFallback: resolveModelFallback(raw["model_fallback"], providers),
+    systemPrompt: resolveSystemPromptConfig(raw["system_prompt"]),
     ...overrides,
   };
 
