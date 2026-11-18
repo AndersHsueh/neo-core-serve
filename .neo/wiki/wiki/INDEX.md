@@ -67,7 +67,7 @@
 - 代码来源：[`docs/provenance.md`](../../../docs/provenance.md)
 - 运维：[`docs/ops.md`](../../../docs/ops.md)
 - GUI 接入：[`docs/gui-integration-v0.0.2.md`](../../../docs/gui-integration-v0.0.2.md)
-- GUI 仓库：[`neo-agent-app`](../../../../neo-agent-app) · 联调报告：[`docs/integration-v0.0.2-report.md`](../../../../neo-agent-app/docs/integration-v0.0.2-report.md) · Hub 实测：[`docs/hub-probe-findings.md`](../../../../neo-agent-app/docs/hub-probe-findings.md)
+- GUI 仓库：[`neo-agent-app`](https://github.com/AndersHsueh/neo-agent-app) · 联调报告：[`docs/integration-v0.0.2-report.md`](https://github.com/AndersHsueh/neo-agent-app/blob/de68bcc/docs/integration-v0.0.2-report.md) · Hub 实测：[`docs/hub-probe-findings.md`](https://github.com/AndersHsueh/neo-agent-app/blob/de68bcc/docs/hub-probe-findings.md)
 - 日志：[[log]]
 
 ## 维护提醒

@@ -55,9 +55,9 @@ v0.0.2 发布时 GUI 联调（验收清单 J2–J5）仍为 ⬜，`docs/gui-inte
 ## 关联
 
 - GUI 仓：`neo-agent-app`（tag `v0.1.0`，commit `de68bcc`）
-- 联调报告：[`neo-agent-app/docs/integration-v0.0.2-report.md`](../../../../neo-agent-app/docs/integration-v0.0.2-report.md)
-- Hub 实测清单：[`neo-agent-app/docs/hub-probe-findings.md`](../../../../neo-agent-app/docs/hub-probe-findings.md)
-- 协议 vendor 补丁：[`neo-agent-app/docs/vendor-patches.md`](../../../../neo-agent-app/docs/vendor-patches.md)
+- 联调报告：[`neo-agent-app/docs/integration-v0.0.2-report.md`](https://github.com/AndersHsueh/neo-agent-app/blob/de68bcc/docs/integration-v0.0.2-report.md)
+- Hub 实测清单：[`neo-agent-app/docs/hub-probe-findings.md`](https://github.com/AndersHsueh/neo-agent-app/blob/de68bcc/docs/hub-probe-findings.md)
+- 协议 vendor 补丁：[`neo-agent-app/docs/vendor-patches.md`](https://github.com/AndersHsueh/neo-agent-app/blob/de68bcc/docs/vendor-patches.md)
 - 界面证据：`neo-agent-app/docs/shots/integration-v0.0.2/`
 - 本仓：[[发布-v0.0.2]] · [[协议-Matrix-Core-v1]] · [[边界与迁移]] · 联调指南 `docs/gui-integration-v0.0.2.md`
 
