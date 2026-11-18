@@ -5,6 +5,7 @@
  *  - 每轮前估算 token，超阈值触发 /compact（把旧消息总结成一条 system 摘要）。
  *  - reasoning_content 不入历史，避免思维链污染后续轮次。
  */
+
 import { chatStream, estimateTokens, contentText, LLMError, type Message, type ToolSpec } from "./llm.ts";
 import {
   applyTier,
@@ -13,182 +14,42 @@ import {
   type ModelTier,
 } from "./config.ts";
 import { StreamFormatter } from "./ui/stream.ts";
-import type { AskUserAnswer, AskUserRequest } from "./ui/askUser.ts";
 import { renderMarkdown } from "./ui/render.ts";
 import { c, colorEnabled } from "./ui/theme.ts";
 import { Classifier } from "./classifier/index.ts";
-import { dispatch, toolSpecs, toolNames, toolKindOf, TOOL_NAMES_EXCLUDED_FOR_SUBAGENT, type ToolCtx } from "./tools/index.ts";
-import { ToolError, type CheckpointSink } from "./tools/types.ts";
-import { isRecallMessage, type MemoryPort } from "./memory/port.ts";
-
-/**
- * 连续 capability 调用阈值（2026-10-26）。
- *
- * 取 4 而不是 2/3：正常排查里连续两次 shell 很常见（`ls` 再看 `cat`），
- * 阈值太低会把正常工作流误判成漂移，提示变成噪音、被模型学会忽略。
- * 4 次连续只扩展手段而无事实产出，已经不像在查东西，更像在开通道。
- */
-const CAPABILITY_STREAK_LIMIT = 4;
-import { appendTurnLog } from "./turnDiagnostics.ts";
+import { dispatch, toolSpecs, toolNames, toolKindOf, TOOL_NAMES_EXCLUDED_FOR_SUBAGENT } from "./tools/index.ts";
+import { ToolError } from "./tools/types.ts";
+import { isRecallMessage } from "./memory/port.ts";
 import { isContextOverflowError, parseContextLimitFromError } from "./contextWindow.ts";
+import {
+  COMPACT_INPUT_CHAR_CAP,
+  COMPACT_KEEP_TAIL,
+  COMPACT_MSG_CHAR_CAP,
+  type AgentEvent,
+  type AgentIO,
+  type AgentOptions,
+  type PermissionMode,
+  type TurnStats,
+} from "./agent/types.ts";
+import { previewArgs, truncateArgs } from "./agent/format.ts";
+import {
+  budgetMessage,
+  dropTransientMessage,
+  emitMemoryCapture,
+  makeCtx,
+  readGoalSafe,
+  trimOldToolOutputs,
+  writeTurnLog,
+} from "./agent/support.ts";
+import {
+  ensureUserPromptSubmit,
+  runPreCompact,
+  runSessionStart,
+  runStopHooks,
+} from "./agent/lifecycle.ts";
 
-export type PermissionMode = "ask" | "auto-edit" | "auto-all" | "plan";
-
-/* ------------------------------------------------------------------ */
-/* 上下文压缩参数（P0-2）                                              */
-/* ------------------------------------------------------------------ */
-
-/** 压缩后保留的近期原文条数（上限）。最近的路径/命令/错误细节靠它活着。 */
-const COMPACT_KEEP_TAIL = 6;
-/** 喂给摘要器的单条消息字符上限。旧的 160 字符会砍掉路径、命令与错误栈。 */
-const COMPACT_MSG_CHAR_CAP = 2_000;
-/** 摘要器输入总字符上限，防止一次压缩把窗口再撑爆。 */
-const COMPACT_INPUT_CHAR_CAP = 60_000;
-
-/**
- * Agent 对输出层的最小依赖面。
- *
- * 抽成接口而非直接用 Console 类，是为了让子代理能注入静音实现 ——
- * 子代理的流式输出若直接写终端，会与 readline 管理的光标打架。
- * TS 结构化类型下 Console 自动满足本接口，Console 本体零改动。
- */
-export interface AgentIO {
-  line(s?: string): void;
-  blank(): void;
-  info(msg: string): void;
-  warn(msg: string): void;
-  error(msg: string): void;
-  toolHeader(name: string, argsPreview: string): void;
-  toolResult(body: string, maxLines?: number, ok?: boolean): void;
-  /** 统一缩进（纯格式化，无副作用）。 */
-  indent(body: string, prefix?: string): string;
-  startSpinner(text: string): void;
-  updateSpinner(text: string): void;
-  stopSpinner(finalLine?: string): void;
-  beginStream(kind: "reasoning" | "answer" | "tool-args"): void;
-  writeStream(text: string, kind: "reasoning" | "answer" | "tool-args"): void;
-  endStream(kind?: "reasoning" | "answer" | "tool-args", newline?: boolean): void;
-  /** 关闭当前打开的流式块（kind 由 Console 自己记录，调用方不再猜）。 */
-  ensureStreamClosed(): void;
-  /** 与 Console 共享的输出通道（正文经 StreamFormatter 写入时用）。 */
-  writeRaw?(s: string): void;
-  confirm(question: string): Promise<boolean>;
-  readonly width: number;
-}
-
-export interface AgentEvent {
-  type:
-    | "text"
-    | "reasoning"
-    | "tool_start"
-    | "tool_end"
-    | "turn_end"
-    | "error"
-    | "compact"
-    | "tier_switch"
-    | "aborted";
-  data?: unknown;
-}
-
-export interface AgentOptions {
-  cfg: Config;
-  /** 输出层。主代理传 Console，子代理输出静音（confirm/warn 可委托主 console）。 */
-  console: AgentIO;
-  mode: PermissionMode;
-  systemPrompt: string;
-  onEvent?: (e: AgentEvent) => void;
-  /** 分类器。为 undefined 时不做自动分类。 */
-  classifier?: Classifier;
-  /**
-   * LLM 流式函数注入点，默认用真实 chatStream。
-   * 测试用：避免 mock.module 全局污染其它测试文件（bun test 单进程共享模块表）。
-   */
-  chatStream?: typeof chatStream;
-  /**
-   * 记忆端口（v0.2 记忆激活 §7.8.1）。不传 = 无记忆（子代理/task 默认如此）。
-   * 记忆是增强项：任何调用失败都不得影响主流程。
-   */
-  memory?: MemoryPort;
-  /**
-   * 跨会话消息注入点（PRD v1.2 §4.4 P1）。
-   * 只在「本轮已有工具批次结束」的下一次迭代、自动 compact 之后调用；
-   * 返回已框架化的 user 内容。回调由组合根注入，agent.ts 不 import 信箱模块。
-   */
-  pollInbox?: () => string[];
-  /**
-   * 是否为 task 工具派生的子代理。
-   * 只有子代理才应用 TOOL_NAMES_EXCLUDED_FOR_SUBAGENT 过滤；
-   * 主代理必须能看到全部运行时注册工具（task / wiki_* / remember / send_message / list_peers）。
-   */
-  isSubagent?: boolean;
-  /**
-   * 非交互单次模式（-p）：即使 stdout 是 TTY 也用块级渲染，不逐 chunk 流式输出。
-   * 否则 `neo -p` 在真终端里会喷出 spinner/ANSI，脚本与日志都难读。
-   */
-  nonInteractive?: boolean;
-  /**
-   * 写文件检查点（P0-4）。主代理由组合根注入会话级 CheckpointStore；
-   * 子代理沿用父代理的实例（写入仍记在同一个会话下）。
-   */
-  checkpoint?: CheckpointSink;
-  /**
-   * 会话 id（v0.4.1 A1）：只用于轮次诊断日志定位；不传时日志记 "unknown"。
-   */
-  sessionId?: string;
-  /**
-   * 上下文窗口探测回调（v0.4.1 A2）：从服务端溢出错误里解析到真实窗口时调用，
-   * 组合根负责持久化到 env 事实文件；agent 已先同步更新 cfg.contextWindow。
-   */
-  onContextLimit?: (tokens: number, model: string) => void;
-  /**
-   * 每轮开始前刷新上下文窗口（v0.4.1 A2）：/model、/tier 切模型后从 env 缓存
-   * 重新解析当前模型窗口，避免沿用上一个模型的值。
-   */
-  refreshContextWindow?: () => void;
-  /**
-   * 流式渲染开关（Matrix-Core 移植改动，2026-10-28）。
-   *
-   * 取代 `process.stdout.isTTY`：core 无终端，由组合根（session-host）显式注入
-   * 是否逐 chunk 渲染。`undefined` 时回落旧行为（仅在非 core 的 CLI 路径有意义）。
-   */
-  streaming?: boolean;
-  /** 向用户提问（v0.4.1 B2）：仅交互 TUI 注入；ask_user 工具使用。 */
-  askUser?: (req: AskUserRequest) => Promise<AskUserAnswer>;
-  /** 强制关闭提问模态（用户 abort 时）。 */
-  cancelAskUser?: () => void;
-  /**
-   * 目标锚读取（2026-10-26）。每轮请求前调用一次，结果写进临时 system 提示。
-   *
-   * 为什么是回调而不是字段：agent.ts 不 import mailbox（避免循环依赖），
-   * 且目标可能在会话中途被 /goal 改写，每轮现取才能跟上。
-   * 返回 null = 未设目标，此时提示退化为纯预算（与旧行为一致）。
-   */
-  readGoal?: () => string | null;
-}
-
-export interface TurnStats {
-  durationMs: number;
-  promptTokens: number;
-  completionTokens: number;
-  reasoningTokens: number;
-  toolCalls: number;
-  iterations: number;
-  finishReason: string | null;
-  aborted: boolean;
-  /** 本轮是否发生 LLM 错误（`-p --output-format json` 的退出码依据）。 */
-  hadError: boolean;
-  /** 人类可读的错误原因；无错误为 null。 */
-  errorMessage: string | null;
-  /**
-   * 空正文终态（v0.4.1 A1）：模型连续两轮没有输出正文。
-   * 这类轮次没有 assistant 消息，必须按错误处理，不能报 ok。
-   */
-  emptyResponse: boolean;
-  /** 轮末上下文使用率 0..1（估算值），写诊断日志用。 */
-  contextUsage: number;
-  /** 本轮因分类而发生的档位切换，无则 null。 */
-  tierSwitch: { from: ModelTier; to: ModelTier; reason: string; degraded?: string } | null;
-}
+export type { AgentEvent, AgentIO, AgentOptions, PermissionMode, TurnStats } from "./agent/types.ts";
+export { renderFinal } from "./agent/format.ts";
 
 export class Agent {
   messages: Message[] = [];
@@ -205,7 +66,8 @@ export class Agent {
    * 注意：计数本身不拦人，只喂给 budgetMessage 让模型看见。后台默默计数、
    * 到阈值才提示，等于模型全程无感 —— 那和 isStuck 没区别，只是换了判据。
    */
-  private capabilityStreak = 0;
+  /** @internal 供 agent/support.ts 使用 */
+  capabilityStreak = 0;
   /**
    * compact_ctx 工具登记的压缩请求。
    * 工具执行点不是安全切点（assistant(tool_calls) 与 tool 结果尚未配对完），
@@ -216,15 +78,19 @@ export class Agent {
   private totalPrompt = 0;
   private totalCompletion = 0;
   private totalReasoning = 0;
-  private lastStats: TurnStats | null = null;
+  /** @internal 供 agent/support.ts 使用 */
+  lastStats: TurnStats | null = null;
   /** 轮次序号：记忆捕获的审计键（会话内递增，不跨会话）。 */
-  private turnSeq = 0;
+  /** @internal 供 agent/support.ts 使用 */
+  turnSeq = 0;
   /** 诊断日志的轮次计数（v0.4.1 A1；与记忆 turnSeq 解耦）。 */
-  private turnCounter = 0;
+  /** @internal 供 agent/support.ts 使用 */
+  turnCounter = 0;
   /** 最近一次压缩的前后 tokens（只用于本轮诊断日志）。 */
-  private lastCompact: { beforeTokens: number; afterTokens: number } | null = null;
+  /** @internal 供 agent/support.ts 使用 */
+  lastCompact: { beforeTokens: number; afterTokens: number } | null = null;
 
-  constructor(private readonly opt: AgentOptions) {
+  constructor(readonly opt: AgentOptions) {
     this.mode = opt.mode;
     this.messages = [{ role: "system", content: opt.systemPrompt }];
   }
@@ -1016,189 +882,19 @@ export class Agent {
     return this.lastStats;
   }
 
-  /**
-   * 写一轮诊断日志（v0.4.1 A1）。失败静默：诊断不得影响主流程。
-   * 只记元数据，不记 prompt/回答正文。
-   */
-  private writeTurnLog(stats: TurnStats): void {
-    // 没有会话 id = 测试/裸 Agent：不写盘，避免单测污染用户 ~/.neo/logs。
-    if (!this.opt.sessionId) return;
-    appendTurnLog({
-      sessionId: this.opt.sessionId,
-      turn: this.turnCounter,
-      provider: this.opt.cfg.providerName,
-      model: this.opt.cfg.model,
-      durationMs: stats.durationMs,
-      iterations: stats.iterations,
-      toolCalls: stats.toolCalls,
-      promptTokens: stats.promptTokens,
-      completionTokens: stats.completionTokens,
-      reasoningTokens: stats.reasoningTokens,
-      finishReason: stats.finishReason,
-      aborted: stats.aborted,
-      hadError: stats.hadError,
-      emptyResponse: stats.emptyResponse,
-      errorMessage: stats.errorMessage,
-      contextWindow: this.opt.cfg.contextWindow,
-      contextUsage: stats.contextUsage,
-      ...(this.lastCompact
-        ? { compaction: { before: this.lastCompact.beforeTokens, after: this.lastCompact.afterTokens } }
-        : {}),
-    });
-  }
 
-  /**
-   * 上下文溢出兜底（A2）：压缩不可用时，把最老的一批 tool 输出替换为占位文本。
-   * 只动 tool content，不改角色/配对，消息序列仍然合法。
-   */
-  private trimOldToolOutputs(keepRecent = 6): void {
-    const toolIndices: number[] = [];
-    this.messages.forEach((m, i) => {
-      if (m.role === "tool") toolIndices.push(i);
-    });
-    const drop = Math.max(0, toolIndices.length - Math.max(0, keepRecent));
-    for (let k = 0; k < drop; k++) {
-      const idx = toolIndices[k];
-      if (idx === undefined) continue;
-      const m = this.messages[idx];
-      if (!m) continue;
-      const before = contentText(m.content)?.length ?? 0;
-      m.content = `[旧工具输出已裁剪以适配上下文（原 ${before} 字符）；如需重看请重新调用工具]`;
-    }
-  }
-
-  /**
-   * 轮末捕获入口（§7.6.1 T1 / abort）。
-   * fire-and-forget：捕获内部有队列与失败降级，绝不允许异常冒泡到主循环。
-   */
-  private emitMemoryCapture(turnStart: number, kind: "turn" | "aborted"): void {
-    const mem = this.opt.memory;
-    if (!mem) return;
-    this.turnSeq += 1;
-    try {
-      mem.capture({
-        kind,
-        messages: this.messages.slice(turnStart),
-        turn: this.turnSeq,
-        ...(this.lastStats
-          ? {
-              stats: {
-                toolCalls: this.lastStats.toolCalls,
-                iterations: this.lastStats.iterations,
-                aborted: this.lastStats.aborted,
-                finishReason: this.lastStats.finishReason,
-              },
-            }
-          : {}),
-      });
-    } catch {
-      // 捕获失败静默：记忆不是主流程的一部分
-    }
-  }
-
-  /**
-   * 构造本轮预算 + 目标提示。
-   *
-   * 每次请求前注入、请求后移除，模型因此始终知道「这是第几次、还剩几次」。
-   * 剩余 ≤ 5 时额外给出明确次数并要求收敛 —— 只写「即将耗尽」模型无法判断
-   * 还能做几件事，往往会继续探索，最后被硬截断，用户拿到半截答案。
-   *
-   * 2026-10-26 追加目标锚：只报消耗量不够。跑偏的会话每步都有进展
-   * （DNS 解析成功、拿到 IP 都是真的），心跳满格方向全错。把原始目标
-   * 每轮摆在这里，是给模型一个「离目标多远」的信号，而不只是「还剩几步」。
-   * 目标由用户/宿主写入，模型只读 —— 提示里明确写出这一点，防止它自行重述。
-   */
-  /**
-   * 读目标锚，任何异常都降级为 null。
-   *
-   * 目标锚是增强项：注入方（组合根 / 子代理 / 测试）抛错不得炸掉整轮。
-   * 组合根那侧也包了 try/catch，但调用方必须自己兜底 —— 否则任何注入方
-   * 的疏忽都会让主流程崩，而这条约定该由调用点保证。
-   */
-  private readGoalSafe(): string | null {
-    try {
-      const g = this.opt.readGoal?.() ?? null;
-      return g && g.trim() ? g : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private budgetMessage(attempt: number, max: number): Message {
-    const remaining = Math.max(0, max - attempt);
-    let text =
-      `本轮工具调用：第 ${attempt} 次 / 上限 ${max}（已用 ${attempt - 1}，剩余 ${remaining}）。`;
-    const goal = this.readGoalSafe();
-    if (goal) {
-      text +=
-        `\n原始目标（用户设定，你不可修改）：${goal}` +
-        `\n每次调用工具前自问：这一步是在产出关于目标的事实，还是只在扩展手段？` +
-        `若连续多次只扩展手段而无新事实，停下来回到目标本身。`;
-      // 手段/目标分层计数（2026-10-26）：把偏离做成可见数字。
-      // 只在设了目标时显示 —— 没有目标就没有「离目标多远」可言。
-      if (this.capabilityStreak > 0) {
-        text += `\n距上次产出事实，已连续 ${this.capabilityStreak} 次只扩展手段（shell/发消息/派子代理/加载技能）。`;
-        if (this.capabilityStreak >= CAPABILITY_STREAK_LIMIT) {
-          text +=
-            `\n**已超过 ${CAPABILITY_STREAK_LIMIT} 次阈值**：你正在把手段当成目标。` +
-            `立刻停止扩展能力，回到原始目标：现在手上已有的事实够回答吗？` +
-            `够就直接答；不够就说明缺什么，不要再去开新通道。`;
-        }
-      }
-    }
-    if (remaining <= 5) {
-      text +=
-        `\n预算即将耗尽，仅剩 ${remaining} 次工具调用机会。` +
-        `请停止继续探索，立即基于已有信息给出最终答案；` +
-        `信息不足就在答案中明确说明缺什么，不要再用工具。`;
-    }
-    return { role: "system", content: text };
-  }
-
-  /** 移除临时消息（预算提示 / 重试提示）。按引用比对，避免误删历史里内容相同的消息。 */
-  private dropTransientMessage(msg: Message): void {
-    const i = this.messages.lastIndexOf(msg);
-    if (i !== -1) this.messages.splice(i, 1);
-  }
-
-  private makeCtx(signal: AbortSignal): ToolCtx {
-    const mode = this.mode;
-    const ui = this.opt.console;
-    return {
-      cfg: this.opt.cfg,
-      signal,
-      host: this,
-      checkpoint: this.opt.checkpoint,
-      approve: async (tool, detail) => {
-        if (mode === "auto-all") return true;
-        if (mode === "auto-edit" && tool !== "shell") return true;
-        if (mode === "plan") {
-          ui.warn(`plan 模式禁止 ${tool}：${detail}`);
-          return false;
-        }
-        return ui.confirm(`${tool} — ${detail}`);
-      },
-      onNotice: (m) => ui.info(m),
-      onProgress: (m) => ui.updateSpinner(m),
-      askUser: this.opt.askUser,
-      cancelAskUser: this.opt.cancelAskUser,
-      readOnly: this.opt.mode === "plan",
-    };
-  }
-}
-
-function truncateArgs(s: string, max = 160): string {
-  const flat = s.replace(/\s+/g, " ").trim();
-  return flat.length > max ? flat.slice(0, max) + "…" : flat;
-}
-
-function previewArgs(s: string): string {
-  return truncateArgs(s, 100);
-}
-
-/** 渲染一次完整的助手回答（用于历史回放 / 导出）。 */
-export function renderFinal(md: string, width = 100): string {
-  return renderMarkdown(md, width);
+  /* 抽出的辅助与生命周期端口（行为不变；lifecycle 默认 no-op）。 */
+  writeTurnLog = writeTurnLog;
+  trimOldToolOutputs = trimOldToolOutputs;
+  emitMemoryCapture = emitMemoryCapture;
+  readGoalSafe = readGoalSafe;
+  budgetMessage = budgetMessage;
+  dropTransientMessage = dropTransientMessage;
+  makeCtx = makeCtx;
+  runSessionStart = runSessionStart;
+  ensureUserPromptSubmit = ensureUserPromptSubmit;
+  runStopHooks = runStopHooks;
+  runPreCompact = runPreCompact;
 }
 
 export { c, toolNames };

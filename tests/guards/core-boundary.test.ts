@@ -119,15 +119,54 @@ describe("core 边界守卫", () => {
     expect(violations).toEqual([]);
   });
 
-  test("core/agent.ts 不得再使用 process.stdout.isTTY（流式由 streaming 注入）", async () => {
-    const agentPath = join(CORE_DIR, "agent.ts");
-    const text = await readFile(agentPath, "utf8");
-    const hits = codeLines(text)
-      .filter(({ code }) => /process\.stdout\.isTTY/.test(code))
-      .map(({ no, code }) => `${rel(agentPath)}:${no} —— ${code.trim()}`);
+  test("core Agent 模块不得再使用 process.stdout.isTTY（流式由 streaming 注入）", async () => {
+    const agentFiles = (await listCoreFiles()).filter((f) => {
+      const r = rel(f);
+      return r === "src/core/agent.ts" || r.startsWith("src/core/agent/");
+    });
+    expect(agentFiles.length, "没扫到 agent 模块").toBeGreaterThan(1);
+    const hits: string[] = [];
+    let hasStreamingOpt = false;
+    for (const file of agentFiles) {
+      const text = await readFile(file, "utf8");
+      hits.push(
+        ...codeLines(text)
+          .filter(({ code }) => /process\.stdout\.isTTY/.test(code))
+          .map(({ no, code }) => `${rel(file)}:${no} —— ${code.trim()}`),
+      );
+      if (codeLines(text).some(({ code }) => /streaming\??\s*:/.test(code))) hasStreamingOpt = true;
+    }
     expect(hits).toEqual([]);
-    // 反过来确认注入点还在：streaming 选项是唯一开关。
-    expect(codeLines(text).some(({ code }) => /streaming\??\s*:/.test(code))).toBe(true);
+    // 反过来确认注入点还在：streaming 选项是唯一开关（类型已抽到 agent/types.ts）。
+    expect(hasStreamingOpt).toBe(true);
+  });
+
+  test("core 不得 import neo-cli / 外部 TUI，也不得 value-import Console 具体类", async () => {
+    const files = await listCoreFiles();
+    const violations: string[] = [];
+    for (const file of files) {
+      const text = await readFile(file, "utf8");
+      for (const imp of scanImports(text)) {
+        const spec = imp.from;
+        if (
+          spec === "neo" ||
+          spec === "neo-cli" ||
+          spec.startsWith("neo/") ||
+          spec.startsWith("neo-cli/") ||
+          spec.includes("neo-tui") ||
+          spec.includes("neo-agent/")
+        ) {
+          violations.push(`${rel(file)}:${imp.line} import ${spec}`);
+        }
+        // 具体 Console 类：只允许类型注释里提，不允许 value import。
+        // ui 兼容层自身也不实现 Console（Console 在 neo-cli）。
+        const head = text.split("\n")[imp.line - 1] ?? "";
+        if (!imp.typeOnly && /\bConsole\b/.test(head) && /\bimport\b/.test(head)) {
+          violations.push(`${rel(file)}:${imp.line} value-import Console from ${spec}`);
+        }
+      }
+    }
+    expect(violations).toEqual([]);
   });
 
   test("core 不得运行时 import serve/（只允许 `import type ... serve/types.ts`）", async () => {
