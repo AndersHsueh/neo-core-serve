@@ -14,16 +14,21 @@ import {
   type MailboxConfig,
 } from "../mailbox/types.ts";
 import {
+  DEFAULT_OUTPUT_PROBE,
+  DEFAULT_RETRY_CONFIG,
   IMPLEMENTED_PROVIDER_TYPES,
+  MAX_MODEL_FALLBACKS,
   MODEL_TIERS,
   TIER_FIELD,
+  isImplemented,
   type MemoryConfig,
+  type ModelTarget,
   type ModelTier,
+  type OutputProbeSettings,
   type PasteConfig,
   type ProviderConfig,
   type ProviderType,
   type RetryConfig,
-  DEFAULT_RETRY_CONFIG,
 } from "./types.ts";
 
 export type Raw = Record<string, unknown>;
@@ -237,6 +242,7 @@ export function parseProviders(raw: unknown): ProviderConfig[] {
       maxTokens: numOrNull(p["max_tokens"]),
       temperature: numOrNull(p["temperature"]),
       contextWindow: numOrNull(p["context_window"]),
+      outputProbe: resolveOutputProbe(p["probe_max_output_tokens"]),
     };
   });
 }
@@ -264,6 +270,7 @@ export function providerFromLegacy(raw: Raw): ProviderConfig | null {
     maxTokens: numOrNull(raw["max_tokens"]),
     temperature: numOrNull(raw["temperature"]),
     contextWindow: numOrNull(raw["context_window"]),
+    outputProbe: resolveOutputProbe(raw["probe_max_output_tokens"]),
   };
 }
 
@@ -319,3 +326,83 @@ export function resolveMemoryConfig(raw: Raw | undefined): MemoryConfig {
 }
 
 /** 解析某档位在路由表下的实际模型名。route.model 为空则取该 provider 的同名档位。 */
+
+function clampInt(v: unknown, min: number, max: number): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  return Math.min(max, Math.max(min, Math.floor(v)));
+}
+
+/**
+ * 解析 settings 里的 `probe_max_output_tokens`：
+ *  - 未配置（undefined）→ undefined，表示用户没表达意图；
+ *  - 布尔简写 true/false → 只改 enabled；
+ *  - 对象 → `{ enabled?: boolean, max_attempts?, start?, cap? }`，缺 enabled 视为开启；
+ *  - 其它形状（字符串/数组/数字/null）→ undefined，不抛错。
+ *
+ * 越界值夹紧：max_attempts 1–8、start ≥256、cap < start 时以 start 为准。
+ */
+export function resolveOutputProbe(raw: unknown): OutputProbeSettings | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === "boolean") return { ...DEFAULT_OUTPUT_PROBE, enabled: raw };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const rec = raw as Record<string, unknown>;
+  const enabled = typeof rec["enabled"] === "boolean" ? rec["enabled"] : true;
+  const maxAttempts = clampInt(rec["max_attempts"], 1, 8) ?? DEFAULT_OUTPUT_PROBE.maxAttempts;
+  const start = clampInt(rec["start"], 256, Number.MAX_SAFE_INTEGER) ?? DEFAULT_OUTPUT_PROBE.start;
+  const capRaw = clampInt(rec["cap"], 256, Number.MAX_SAFE_INTEGER) ?? DEFAULT_OUTPUT_PROBE.cap;
+  return { enabled, maxAttempts, start, cap: Math.max(capRaw, start) };
+}
+
+/** 校验一个 target：provider 必须存在且协议已接入，model 非空。 */
+function assertModelTarget(target: ModelTarget, providers: ProviderConfig[], where: string): void {
+  if (!target.provider || !target.model) {
+    throw new ConfigError(`${where} 需要非空的 provider 与 model。`);
+  }
+  const found = providers.find((x) => x.name === target.provider);
+  if (!found) {
+    throw new ConfigError(
+      `${where} 的 provider "${target.provider}" 不在 providers 列表中。` +
+        `已配置：${providers.map((x) => x.name).join(", ") || "（无）"}`,
+    );
+  }
+  if (!isImplemented(found.type)) {
+    throw new ConfigError(
+      `${where} 的 provider "${target.provider}" 声明为 ${found.type} 协议，但请求层尚未接入。` +
+        `已实现：${IMPLEMENTED_PROVIDER_TYPES.join(", ")}。`,
+    );
+  }
+}
+
+/**
+ * 严格解析 settings.model_fallback：只接受对象数组，不接受字符串简写、对象 map 或旧字段别名。
+ * 缺省 / [] = 禁用；任何非法形状、未知 provider、空字段、重复项或超过 8 项都在模型请求前报错。
+ */
+export function resolveModelFallback(raw: unknown, providers: ProviderConfig[]): ModelTarget[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) {
+    throw new ConfigError("settings.model_fallback 必须是对象数组（[{provider, model}, ...]）。");
+  }
+  if (raw.length > MAX_MODEL_FALLBACKS) {
+    throw new ConfigError(`settings.model_fallback 最多 ${MAX_MODEL_FALLBACKS} 项（收到 ${raw.length} 项）。`);
+  }
+  const seen = new Set<string>();
+  return raw.map((item, i) => {
+    const where = `model_fallback[${i}]`;
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      throw new ConfigError(`${where} 必须是 {provider, model} 对象。`);
+    }
+    const rec = item as Record<string, unknown>;
+    const target: ModelTarget = {
+      provider: typeof rec["provider"] === "string" ? rec["provider"].trim() : "",
+      model: typeof rec["model"] === "string" ? rec["model"].trim() : "",
+    };
+    assertModelTarget(target, providers, where);
+    const key = `${target.provider}\u0000${target.model}`;
+    if (seen.has(key)) {
+      throw new ConfigError(`${where} 与前面的备用项重复：${target.provider}:${target.model}。`);
+    }
+    seen.add(key);
+    return target;
+  });
+}
+

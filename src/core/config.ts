@@ -20,8 +20,10 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import {
+  DEFAULT_OUTPUT_PROBE,
   DEFAULT_RETRY_CONFIG,
   IMPLEMENTED_PROVIDER_TYPES,
+  MAX_MODEL_FALLBACKS,
   MODEL_TIERS,
   isImplemented,
   isModelTier,
@@ -30,7 +32,9 @@ import {
   tierDisplayName,
   type Config,
   type MemoryConfig,
+  type ModelTarget,
   type ModelTier,
+  type OutputProbeSettings,
   type PasteConfig,
   type ProviderConfig,
   type ProviderType,
@@ -48,6 +52,8 @@ import {
   resolveInboundPolicy,
   resolveMailboxSettings,
   resolveMemoryConfig,
+  resolveModelFallback,
+  resolveOutputProbe,
   resolvePasteConfig,
   resolveRetryConfig,
   resolveShellConfig,
@@ -58,8 +64,10 @@ import {
 } from "./config/parse.ts";
 
 export {
+  DEFAULT_OUTPUT_PROBE,
   DEFAULT_RETRY_CONFIG,
   IMPLEMENTED_PROVIDER_TYPES,
+  MAX_MODEL_FALLBACKS,
   MODEL_TIERS,
   isImplemented,
   isModelTier,
@@ -69,12 +77,16 @@ export {
   ConfigError,
   normalizeBaseUrl,
   parseSkillsExtraPaths,
+  resolveModelFallback,
+  resolveOutputProbe,
   resolveRetryConfig,
 };
 export type {
   Config,
   MemoryConfig,
+  ModelTarget,
   ModelTier,
+  OutputProbeSettings,
   PasteConfig,
   ProviderConfig,
   ProviderType,
@@ -295,6 +307,7 @@ export function loadConfig(overrides: Partial<Config> = {}, options: LoadConfigO
     paste: resolvePasteConfig(raw["paste"] as Raw | undefined),
     mailbox: resolveMailboxSettings(raw),
     crossSessionInbound: resolveInboundPolicy(raw["cross_session_inbound"]),
+    modelFallback: resolveModelFallback(raw["model_fallback"], providers),
     ...overrides,
   };
 

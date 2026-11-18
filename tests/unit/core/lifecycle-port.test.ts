@@ -83,6 +83,7 @@ function miniConfig(): Config {
     mailbox: DEFAULT_MAILBOX_CONFIG,
     crossSessionInbound: "auto",
     cwd: "/tmp",
+    modelFallback: [],
     settingsPath: null,
     skillsStore: "/tmp/skills",
     memory: {

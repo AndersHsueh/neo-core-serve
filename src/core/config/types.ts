@@ -86,6 +86,37 @@ export function tierChoiceLabel(tier: ModelTier | string): string {
   return short === tier ? short : `${short} (${tier})`;
 }
 
+
+/**
+ * 输出上限（`max_output_tokens`）主动探测的配置。
+ * 默认关闭：探测会花请求配额，必须用户显式开启。
+ */
+export interface OutputProbeSettings {
+  enabled: boolean;
+  /** 一次探测最多发几个请求（1–8）。 */
+  maxAttempts: number;
+  /** 第一个候选预算；之后每档翻倍。 */
+  start: number;
+  /** 候选上限，防止为探极端值多花请求。 */
+  cap: number;
+}
+
+export const DEFAULT_OUTPUT_PROBE: OutputProbeSettings = {
+  enabled: false,
+  maxAttempts: 3,
+  start: 8_192,
+  cap: 131_072,
+};
+
+/** 备用链单项：明确的 provider + model。与档位 fallback_allowed 不是一回事。 */
+export interface ModelTarget {
+  provider: string;
+  model: string;
+}
+
+/** 备用项上限：有界约束，不是运行时自动截断。 */
+export const MAX_MODEL_FALLBACKS = 8;
+
 export interface ProviderConfig {
   name: string;
   type: ProviderType;
@@ -97,6 +128,11 @@ export interface ProviderConfig {
   maxTokens: number | null;
   temperature: number | null;
   contextWindow: number | null;
+  /**
+   * 输出上限的主动探测配置（K03b-mpa）。undefined = 未配置 = 关闭。
+   * 本批只做解析；真正发探测请求是后续 K05 的事。
+   */
+  outputProbe?: OutputProbeSettings;
 }
 
 /** 档位 → 目标 {provider, model} 的绑定。跨供应商调度靠这个。 */
@@ -193,6 +229,8 @@ export interface Config {
   /** 透传给服务端的思考开关；不设则不下发该字段，由服务端自行决定。 */
   thinking?: { type: "enabled" | "disabled" };
   cwd: string;
+  /** 主模型请求失败后的有序备用链。缺省 / [] = 禁用。本批只解析，不执行切换。 */
+  modelFallback: ModelTarget[];
   settingsPath: string | null;
   /**
    * 全局技能库路径。默认 ~/.neo/skills。
