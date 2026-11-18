@@ -1,13 +1,9 @@
 /**
  * tests/e2e/hub-process-tree.test.ts — Hub 停止时「worker → shell → 孙进程」整条链的回收。
  *
- * 背景（为什么重写）：旧的 `daemon.test.ts`「SIGTERM hub 之后，worker 和孙进程不再写盘」
- * 是**假阳性**——
- *   1. 它靠 `MATRIX_CORE_WORKER_ARGS=--mode auto-all` 绕过审批，并且只等一个
- *      `tool.*` 事件就当作「shell 已经起来了」；任意 tool 事件（甚至 tool.start 之前的
- *      审批/规划事件）都可能在进程真正 spawn 之前到达，于是「孙进程没写 marker」既可能
- *      因为进程被杀，也可能因为进程压根没起来。
- *   2. 它用固定 `sleep(400)` / `sleep(7000)` 猜时序，没有 ready 握手，也没有观测 pid。
+ * 原用例没有显式审批、只等任意 tool.* 加固定延时；基线不识别 auto-all 注入，
+ * shell 可在审批阶段就被停止，marker 不存在不代表进程被清理。
+ * 本用例显式审批，必须先用 ready/PID/PPID 验证已启动，再测试退出和写盘。
  *
  * 本文件的做法：
  *  - 走真实审批：显式等 `approval.request(tool=shell)` 再 `approval.resolve allow`，
@@ -150,7 +146,7 @@ function logRow(label: string, row: PsRow | null): void {
 }
 
 /** 轮询直到 pid 不再存活（排除 Z）；超时返回最后一次观测。 */
-async function waitGone(pid: number, label: string, timeoutMs = GONE_TIMEOUT_MS): Promise<PsRow | null> {
+async function waitGone(pid: number, timeoutMs = GONE_TIMEOUT_MS): Promise<PsRow | null> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const row = await psRow(pid);
@@ -335,118 +331,49 @@ describe.skipIf(!available)("Hub 停止：worker → shell → 孙进程回收",
     TIMEOUT,
   );
 
-  test(
-    "SIGTERM Hub 后 worker/shell/孙进程均不存活，gate 也写不出 marker",
-    async () => {
-      const chain = await startChain("hub-tree-sigterm", { ignoreTerm: false });
-      const marker = join(chain.dirs.work, "marker.txt");
+  /** 同一后置条件用于普通 TERM 与忽略 TERM，不能为 KILL 场景放宽 marker 断言。 */
+  async function assertStopped(chain: Awaited<ReturnType<typeof startChain>>): Promise<void> {
+    const marker = join(chain.dirs.work, "marker.txt");
+    const stopCode = await hub!.stop();
+    hub = null;
+    console.log(`[hub-process-tree] ${JSON.stringify({ phase: "hub.stop", code: stopCode })}`);
+    expect(stopCode).toBe(0);
 
-      // 就绪后 SIGTERM Hub，等它真的退出。
-      const h = hub;
-      expect(h).not.toBeNull();
-      const stopCode = await h!.stop();
-      hub = null;
-      console.log(`[hub-process-tree] ${JSON.stringify({ phase: "hub.stop", code: stopCode })}`);
+    const observed = await Promise.all([
+      psRow(chain.workerPid), psRow(chain.shellPid), psRow(chain.grandchildPid),
+    ]);
+    const labels = ["worker", "shell", "grandchild"];
+    observed.forEach((row, i) => logRow(`after-stop:${labels[i]}`, row));
 
-      // 观测三个 pid 的存活状态并打日志（不输出 token）。
-      const workerRow = await psRow(chain.workerPid);
-      const shellRow = await psRow(chain.shellPid);
-      const grandRow = await psRow(chain.grandchildPid);
-      logRow("after-stop:worker", workerRow);
-      logRow("after-stop:shell", shellRow);
-      logRow("after-stop:grandchild", grandRow);
+    // 让泄漏进程真正产生副作用：如果存活，等它写 marker，防止自行退出掩盖泄漏。
+    await writeFile(join(chain.dirs.work, "gate"), "go\n");
+    if (isAlive(observed[2] ?? null)) {
+      try {
+        await waitFor(() => existsSync(marker), {
+          timeoutMs: MARKER_TIMEOUT_MS, intervalMs: 25, label: "泄漏孙进程写 marker",
+        });
+      } catch { /* 下面仍然检查存活与 marker，不把超时当成功 */ }
+      console.log(`[hub-process-tree] ${JSON.stringify({
+        phase: "grandchild-survived-stop", pid: chain.grandchildPid,
+        markerWritten: existsSync(marker),
+      })}`);
+    }
 
-      // 放 gate：如果孙进程还活着，它会写 marker。
-      await writeFile(join(chain.dirs.work, "gate"), "go\n");
-      const grandStillAlive = isAlive(grandRow);
-      if (grandStillAlive) {
-        // 仍活：等它写 marker 并记录（这是「没被回收」的证据）。
-        try {
-          await waitFor(() => existsSync(marker), {
-            timeoutMs: MARKER_TIMEOUT_MS,
-            intervalMs: 25,
-            label: "marker.txt（孙进程仍存活时）",
-          });
-        } catch {
-          /* 超时也继续：下面统一断言 */
-        }
-        console.log(
-          `[hub-process-tree] ${JSON.stringify({
-            phase: "grandchild-survived-stop",
-            pid: chain.grandchildPid,
-            markerWritten: existsSync(marker),
-          })}`,
-        );
-      }
+    const final = await Promise.all([
+      waitGone(chain.workerPid), waitGone(chain.shellPid), waitGone(chain.grandchildPid),
+    ]);
+    final.forEach((row, i) => {
+      logRow(`final:${labels[i]}`, row);
+      expect(isAlive(row), `${labels[i]} 仍存活：${JSON.stringify(row)}`).toBe(false);
+    });
+    expect(existsSync(marker), "孙进程在 Hub 停止后仍写出了 marker").toBe(false);
+  }
 
-      // 断言：三个进程都不存活（排除 Z），marker 不存在。
-      const workerFinal = await waitGone(chain.workerPid, "worker");
-      const shellFinal = await waitGone(chain.shellPid, "shell");
-      const grandFinal = await waitGone(chain.grandchildPid, "grandchild");
-      logRow("final:worker", workerFinal);
-      logRow("final:shell", shellFinal);
-      logRow("final:grandchild", grandFinal);
+  test("SIGTERM Hub 后 worker/shell/孙进程均不存活，gate 也写不出 marker", async () => {
+    await assertStopped(await startChain("hub-tree-sigterm", { ignoreTerm: false }));
+  }, TIMEOUT);
 
-      expect(isAlive(workerFinal), `worker 仍存活：${JSON.stringify(workerFinal)}`).toBe(false);
-      expect(isAlive(shellFinal), `shell 仍存活：${JSON.stringify(shellFinal)}`).toBe(false);
-      expect(isAlive(grandFinal), `孙进程仍存活：${JSON.stringify(grandFinal)}`).toBe(false);
-      expect(existsSync(marker), "孙进程在 Hub 停止后仍写出了 marker").toBe(false);
-    },
-    TIMEOUT,
-  );
-
-  test(
-    "孙进程空 trap TERM 时，Hub 的 SIGKILL 兜底仍能回收",
-    async () => {
-      const chain = await startChain("hub-tree-sigkill", { ignoreTerm: true });
-      const marker = join(chain.dirs.work, "marker.txt");
-
-      const h = hub;
-      expect(h).not.toBeNull();
-      const stopCode = await h!.stop();
-      hub = null;
-      console.log(`[hub-process-tree] ${JSON.stringify({ phase: "hub.stop", code: stopCode })}`);
-
-      const workerRow = await psRow(chain.workerPid);
-      const shellRow = await psRow(chain.shellPid);
-      const grandRow = await psRow(chain.grandchildPid);
-      logRow("after-stop:worker", workerRow);
-      logRow("after-stop:shell", shellRow);
-      logRow("after-stop:grandchild", grandRow);
-
-      await writeFile(join(chain.dirs.work, "gate"), "go\n");
-      if (isAlive(grandRow)) {
-        try {
-          await waitFor(() => existsSync(marker), {
-            timeoutMs: MARKER_TIMEOUT_MS,
-            intervalMs: 25,
-            label: "marker.txt（孙进程仍存活时）",
-          });
-        } catch {
-          /* 超时也继续 */
-        }
-        console.log(
-          `[hub-process-tree] ${JSON.stringify({
-            phase: "grandchild-survived-stop",
-            pid: chain.grandchildPid,
-            markerWritten: existsSync(marker),
-          })}`,
-        );
-      }
-
-      const workerFinal = await waitGone(chain.workerPid, "worker");
-      const shellFinal = await waitGone(chain.shellPid, "shell");
-      const grandFinal = await waitGone(chain.grandchildPid, "grandchild");
-      logRow("final:worker", workerFinal);
-      logRow("final:shell", shellFinal);
-      logRow("final:grandchild", grandFinal);
-
-      expect(isAlive(workerFinal), `worker 仍存活：${JSON.stringify(workerFinal)}`).toBe(false);
-      expect(isAlive(shellFinal), `shell 仍存活：${JSON.stringify(shellFinal)}`).toBe(false);
-      // 空 trap 的孙进程只能靠 SIGKILL 收掉；它必须死。
-      expect(isAlive(grandFinal), `孙进程（空 trap TERM）仍存活：${JSON.stringify(grandFinal)}`).toBe(false);
-      expect(existsSync(marker), "TERM 忽略孙进程在 Hub 停止后仍写出了 marker").toBe(false);
-    },
-    TIMEOUT,
-  );
+  test("孙进程空 trap TERM 时，Hub 的 SIGKILL 兜底仍能回收", async () => {
+    await assertStopped(await startChain("hub-tree-sigkill", { ignoreTerm: true }));
+  }, TIMEOUT);
 });
