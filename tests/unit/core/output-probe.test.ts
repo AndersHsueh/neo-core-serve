@@ -3,21 +3,30 @@
  * 写回 settings 放在 K05b。C1 解析已由 K03b 覆盖，这里不重复 loadConfig 集成。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { arch, hostname, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { DEFAULT_OUTPUT_PROBE, type Config } from "../../../src/core/config.ts";
 import {
   OUTPUT_PROBE_MEMO_TTL_DAYS,
+  applyProbeOutcome,
   classifyProbeError,
+  persistLearnedOutputLimit,
   probeCandidates,
   readOutputProbeMemo,
   recordOutputLimitFact,
   runOutputProbe,
   shouldRunOutputProbe,
   type OutputProbeSettings,
+  type ProbeOutcome,
 } from "../../../src/core/env/outputProbe.ts";
+import {
+  chat,
+  resetLearnedMaxTokens,
+  resetMaxTokensLimitLearnedHandler,
+  setMaxTokensLimitLearnedHandler,
+} from "../../../src/core/llm.ts";
 import { recordModelContext } from "../../../src/core/env/modelWindows.ts";
 import { machineKeyOf, snapshotFile, writeSnapshot } from "../../../src/core/env/probe.ts";
 import type { EnvStatic } from "../../../src/core/env/types.ts";
@@ -240,5 +249,177 @@ describe("K05a 缓存隔离：provider / model / cwd（env.dir）", () => {
     });
     expect(readOutputProbeMemo(a)?.outcome).toBe("found");
     expect(readOutputProbeMemo(b)?.outcome).toBe("inconclusive");
+  });
+});
+
+
+function writeSettings(providers: Record<string, unknown>[]): string {
+  const dir = join(SANDBOX, `wb-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const path = join(dir, "settings.json");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path, `${JSON.stringify({ default_provider: "p1", providers }, null, 2)}\n`, "utf8");
+  return path;
+}
+
+function readSettings(path: string): { providers: Record<string, unknown>[] } {
+  return JSON.parse(readFileSync(path, "utf8")) as { providers: Record<string, unknown>[] };
+}
+
+function providerEntry(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    provider_name: "p1",
+    provider_type: "openai",
+    base_url: "http://127.0.0.1:1/v1",
+    api_key: "k",
+    default_model_name: "m1",
+    ...over,
+  };
+}
+
+function provFrom(entry: Record<string, unknown>) {
+  return {
+    name: "p1",
+    type: "openai" as const,
+    baseUrl: "http://127.0.0.1:1/v1",
+    apiKey: "k",
+    models: { default: "m1", deep_reasoning: "m1", balanced: "m1", fast: "m1" },
+    maxTokens: (entry["max_tokens"] as number | undefined) ?? null,
+    temperature: null,
+    contextWindow: (entry["context_window"] as number | undefined) ?? null,
+    maxOutputTokens: (entry["max_output_tokens"] as number | undefined) ?? null,
+    vision: entry["vision"] as boolean | undefined,
+    tools: entry["tools"] as boolean | undefined,
+    reasoning: entry["reasoning"] as boolean | undefined,
+  };
+}
+
+describe("B3 结果落地：只有 found 才写配置，且只写空字段", () => {
+  const found = (limit: number): ProbeOutcome => ({
+    outcome: "found",
+    limit,
+    attempts: [{ candidate: 16_384, ok: false, kind: "limit", limit }],
+  });
+
+  test("found + 空字段 → 写 max_output_tokens，并记 env 事实与 memo", () => {
+    const settingsPath = writeSettings([providerEntry({ max_tokens: 8_192 })]);
+    const cfg = makeCfg({ settingsPath, providers: [provFrom(providerEntry())] });
+    writeBaseSnapshot(cfg);
+
+    const r = applyProbeOutcome(cfg, found(32_768));
+    expect(r.written).toEqual(["max_output_tokens"]);
+
+    const prov = readSettings(settingsPath).providers[0]!;
+    expect(prov["max_output_tokens"]).toBe(32_768);
+    expect(prov["max_tokens"]).toBe(8_192);
+
+    expect(readOutputProbeMemo(cfg)).toMatchObject({ outcome: "found", limit: 32_768 });
+  });
+
+  test("found + 已手写上限 → skipped，不覆盖", () => {
+    const settingsPath = writeSettings([providerEntry({ max_output_tokens: 16_384 })]);
+    const cfg = makeCfg({
+      settingsPath,
+      providers: [provFrom(providerEntry({ max_output_tokens: 16_384 }))],
+    });
+    writeBaseSnapshot(cfg);
+
+    const r = applyProbeOutcome(cfg, found(32_768));
+    expect(r.written).toEqual([]);
+    expect(readSettings(settingsPath).providers[0]!["max_output_tokens"]).toBe(16_384);
+  });
+
+  test("inconclusive → 不写配置，只记 memo", () => {
+    const settingsPath = writeSettings([providerEntry()]);
+    const cfg = makeCfg({ settingsPath, providers: [provFrom(providerEntry())] });
+    writeBaseSnapshot(cfg);
+
+    const r = applyProbeOutcome(cfg, {
+      outcome: "inconclusive",
+      reason: "opaque",
+      attempts: [{ candidate: 8_192, ok: false, kind: "opaque" }],
+    });
+    expect(r.written).toEqual([]);
+    expect(readSettings(settingsPath).providers[0]!["max_output_tokens"]).toBeUndefined();
+    expect(readOutputProbeMemo(cfg)).toMatchObject({ outcome: "inconclusive", reason: "opaque" });
+  });
+
+  test("lower_bound → 不写配置，memo 记 atLeast", () => {
+    const settingsPath = writeSettings([providerEntry()]);
+    const cfg = makeCfg({ settingsPath, providers: [provFrom(providerEntry())] });
+    writeBaseSnapshot(cfg);
+
+    const r = applyProbeOutcome(cfg, {
+      outcome: "lower_bound",
+      atLeast: 32_768,
+      attempts: [{ candidate: 32_768, ok: true }],
+    });
+    expect(r.written).toEqual([]);
+    expect(readSettings(settingsPath).providers[0]!["max_output_tokens"]).toBeUndefined();
+    expect(readOutputProbeMemo(cfg)).toMatchObject({ outcome: "lower_bound", atLeast: 32_768 });
+  });
+});
+
+describe("A 免费证据入账：请求报错里学到的上限直接落盘", () => {
+  test("空字段 → 写 max_output_tokens + env 事实", () => {
+    const settingsPath = writeSettings([providerEntry({ max_tokens: 8_192 })]);
+    const cfg = makeCfg({ settingsPath, providers: [provFrom(providerEntry())] });
+    writeBaseSnapshot(cfg);
+
+    const r = persistLearnedOutputLimit(cfg, 24_576, "max tokens > 24576");
+    expect(r.written).toEqual(["max_output_tokens"]);
+    expect(readSettings(settingsPath).providers[0]!["max_output_tokens"]).toBe(24_576);
+    expect(readSettings(settingsPath).providers[0]!["max_tokens"]).toBe(8_192);
+  });
+
+  test("已手写 → 不覆盖", () => {
+    const settingsPath = writeSettings([providerEntry({ max_output_tokens: 65_536 })]);
+    const cfg = makeCfg({
+      settingsPath,
+      providers: [provFrom(providerEntry({ max_output_tokens: 65_536 }))],
+    });
+    writeBaseSnapshot(cfg);
+
+    const r = persistLearnedOutputLimit(cfg, 24_576, "max tokens > 24576");
+    expect(r.written).toEqual([]);
+  });
+
+  test("llm 学到上限时回调监听器（chat 路径），并在 reset 后不再回调", async () => {
+    const seen: number[] = [];
+    setMaxTokensLimitLearnedHandler((e) => seen.push(e.limit));
+    let calls = 0;
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        if (!new URL(req.url).pathname.endsWith("/chat/completions")) {
+          return new Response("nope", { status: 404 });
+        }
+        calls += 1;
+        if (calls === 1) {
+          return Response.json({ error: { message: "max tokens > 4096" } }, { status: 400 });
+        }
+        await req.text();
+        return Response.json({
+          choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+        });
+      },
+    });
+    try {
+      const cfg = makeCfg({
+        baseUrl: `http://127.0.0.1:${server.port}/v1`,
+        maxTokens: 32_768,
+        retry: { maxAttempts: 1, baseDelayMs: 1, connectTimeoutMs: 5000, streamIdleTimeoutMs: 5000 },
+      });
+      await chat(cfg, [{ role: "user", content: "hi" }]);
+      expect(seen).toEqual([4096]);
+      resetMaxTokensLimitLearnedHandler();
+      resetLearnedMaxTokens();
+      await chat({ ...cfg, maxTokens: 32_768 }, [{ role: "user", content: "hi" }]);
+      expect(seen).toEqual([4096]);
+    } finally {
+      server.stop(true);
+      resetMaxTokensLimitLearnedHandler();
+      resetLearnedMaxTokens();
+    }
   });
 });

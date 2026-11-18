@@ -68,7 +68,8 @@ import {
 import { pathPolicyFor } from "./path.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { formatResumeWarning, outcomeOf, type LastTurnMeta } from "./turnDiagnostics.ts";
-import { resolveAndApplyModelWindow, recordModelContext } from "./env/modelWindows.ts";
+import { refreshCapabilitiesAfterModelSwitch, resolveAndApplyModelWindow, recordModelContext } from "./env/modelWindows.ts";
+import { writeBackContextLimit, writeBackOutputLimit } from "./env/modelCaps.ts";
 import { contentText, type Message, type chatStream } from "./llm.ts";
 import { registerTool } from "./tools/index.ts";
 import { makeTaskTool, runSubagent } from "./tools/task.ts";
@@ -504,7 +505,8 @@ class SessionHost implements HostPort {
         askUser: (req) => this.io.askUser(req),
         refreshContextWindow: () => {
           try {
-            resolveAndApplyModelWindow(this.cfg);
+            // 经宿主端口注入：同步换窗 + 异步补 /models 事实，不在 Agent 循环里 import 探测模块。
+            refreshCapabilitiesAfterModelSwitch(this.cfg);
           } catch {
             // 增强项
           }
@@ -516,8 +518,16 @@ class SessionHost implements HostPort {
               source: "overflow_error",
               evidence: "服务端上下文溢出错误",
             });
+            writeBackContextLimit(this.cfg, tokens);
           } catch {
             // 持久化失败不影响恢复
+          }
+        },
+        onOutputLimit: () => {
+          try {
+            void writeBackOutputLimit(this.cfg);
+          } catch {
+            // 写回是增强项
           }
         },
         pollInbox: this.mailbox ? () => this.pollInbox() : undefined,

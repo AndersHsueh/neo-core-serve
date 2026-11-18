@@ -91,6 +91,29 @@ export function resolveAndApplyModelWindow(cfg: Config): ResolvedWindow {
   return resolved;
 }
 
+
+/**
+ * 切换模型/provider/档位后的统一收尾。
+ *
+ * 1. 同步：立刻按 env 缓存/settings 手写解析并写回 cfg；
+ * 2. 异步：fire-and-forget 探测一次 /models，完成后若模型没再被切换则再解析一次。
+ *    失败静默。返回同步阶段的结果。
+ */
+export function refreshCapabilitiesAfterModelSwitch(cfg: Config): ResolvedWindow {
+  const applied = resolveAndApplyModelWindow(cfg);
+  const key = modelKey(cfg.providerName, cfg.model);
+  void detectAndRecordModelWindow(cfg)
+    .then((info) => {
+      if (!info) return;
+      if (modelKey(cfg.providerName, cfg.model) !== key) return;
+      resolveAndApplyModelWindow(cfg);
+    })
+    .catch(() => {
+      /* 探测失败不影响会话 */
+    });
+  return applied;
+}
+
 /** 记录/更新一个模型的窗口事实（合并进静态快照，不影响其它字段）。 */
 export function recordModelContext(
   cfg: Config,
@@ -338,6 +361,79 @@ export function manualCapabilitiesOf(cfg: Config): {
     reasoning: p.reasoning,
     maxOutputTokens: p.maxOutputTokens,
   };
+}
+
+
+export const UNKNOWN_LABEL = "未知";
+
+export function formatCapabilityFlag(v: CapabilityFlag | undefined): string {
+  if (v === true) return "是";
+  if (v === false) return "否";
+  return UNKNOWN_LABEL;
+}
+
+function formatTokens(v: number | null | undefined): string {
+  return typeof v === "number" && Number.isFinite(v) && v > 0
+    ? `${v.toLocaleString()} tokens`
+    : UNKNOWN_LABEL;
+}
+
+function declaredOutputLimit(
+  manual: { maxOutputTokens?: number | null } | undefined,
+  info: ModelContextInfo | null,
+): number | null {
+  const hand = num(manual?.maxOutputTokens);
+  if (hand !== null) return hand;
+  return num(info?.maxOutputTokens);
+}
+
+export interface ModelCapabilityView {
+  contextWindow: string;
+  maxOutputTokens: string;
+  vision: string;
+  tools: string;
+  reasoning: string;
+}
+
+export function buildModelCapabilityView(
+  info: ModelContextInfo | null,
+  manual: { vision?: boolean; tools?: boolean; reasoning?: boolean; maxOutputTokens?: number | null } | undefined,
+  contextWindow: number | null | undefined,
+): ModelCapabilityView {
+  const merged = mergeModelCapabilities(manual, info);
+  return {
+    contextWindow: formatTokens(contextWindow),
+    maxOutputTokens: formatTokens(declaredOutputLimit(manual, info)),
+    vision: formatCapabilityFlag(merged.vision),
+    tools: formatCapabilityFlag(merged.tools),
+    reasoning: formatCapabilityFlag(merged.reasoning),
+  };
+}
+
+export function formatCapabilityGapHint(cfg: Config): string | null {
+  const info = readModelContext(cfg);
+  const manual = manualCapabilitiesOf(cfg);
+  const missing: string[] = [];
+  if (declaredOutputLimit(manual, info) === null) missing.push("max_output_tokens");
+  const merged = mergeModelCapabilities(manual, info);
+  for (const key of ["vision", "tools", "reasoning"] as const) {
+    const hand = manual?.[key];
+    if (hand === true || hand === false) continue;
+    if (merged[key] === "unknown") missing.push(key);
+  }
+  if (missing.length === 0) return null;
+  const ceiling = missing.includes("max_output_tokens")
+    ? "max_output_tokens 是能力上限，请在 settings 手写；它和请求预算 max_tokens 不是同一个字段。"
+    : "请在 settings 手写这些能力（false 也算已声明，不会被覆盖）。";
+  return `未探测到：${missing.join("、")}。网关未提供这些能力。${ceiling}`;
+}
+
+export function currentModelCapabilityView(cfg: Config): ModelCapabilityView {
+  return buildModelCapabilityView(
+    readModelContext(cfg),
+    manualCapabilitiesOf(cfg),
+    cfg.contextWindow,
+  );
 }
 
 /** 给 `/env` 展示用的可读行（失败返回空数组）。 */

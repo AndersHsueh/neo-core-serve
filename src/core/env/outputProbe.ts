@@ -11,9 +11,11 @@ import {
   isAuthErrorText,
   isContextLengthErrorText,
   parseMaxTokensLimit,
+  rawChatOnce,
   LLMError,
   type Message,
 } from "../llm.ts";
+import { writeBackCapabilities } from "./modelCaps.ts";
 import { modelKey, readModelContexts, recordModelContext } from "./modelWindows.ts";
 import type { ModelContextInfo } from "./types.ts";
 
@@ -185,4 +187,74 @@ export function describeProbeOutcome(outcome: ProbeOutcome): string {
     return `行为探测：已验证网关接受 ${outcome.atLeast.toLocaleString()}，未探到上界（未写配置）`;
   }
   return `行为探测：无法确定上限（${outcome.reason}），未写配置`;
+}
+
+/**
+ * 把探测结论落地：只有 `found` 才写 settings（且只写空字段），三种结论都记 env memo。
+ */
+export function applyProbeOutcome(
+  cfg: Config,
+  outcome: ProbeOutcome,
+  opts: { now?: Date } = {},
+): { written: string[]; memo: OutputProbeMemo } {
+  const memo: OutputProbeMemo = {
+    at: (opts.now ?? new Date()).toISOString(),
+    outcome: outcome.outcome,
+  };
+
+  if (outcome.outcome === "found") {
+    memo.limit = outcome.limit;
+    const r = writeBackCapabilities(cfg, { maxOutputTokens: outcome.limit });
+    recordOutputLimitFact(cfg, {
+      value: outcome.limit,
+      evidence: describeProbeOutcome(outcome),
+      memo,
+    });
+    return { written: r.written, memo };
+  }
+
+  if (outcome.outcome === "lower_bound") memo.atLeast = outcome.atLeast;
+  else memo.reason = outcome.reason;
+
+  recordOutputLimitFact(cfg, {
+    value: null,
+    evidence: describeProbeOutcome(outcome),
+    memo,
+  });
+  return { written: [], memo };
+}
+
+/**
+ * A 路径：把「从报错里学到的精确上限」入账。
+ * 只在 `max_output_tokens` 为空时写 settings；env 事实里保留证据文案。
+ */
+export function persistLearnedOutputLimit(
+  cfg: Config,
+  limit: number,
+  evidence: string,
+): { written: string[] } {
+  const n = Math.floor(limit);
+  if (!Number.isFinite(n) || n <= 0) return { written: [] };
+  const r = writeBackCapabilities(cfg, { maxOutputTokens: n });
+  recordOutputLimitFact(cfg, {
+    value: n,
+    evidence: `报错学到上限 ${n.toLocaleString()}：${evidence}`,
+  });
+  return { written: r.written };
+}
+
+/**
+ * 真实探测入口：用 rawChatOnce 发阶梯请求，再把结论落地。
+ * 调用方负责前置判定（shouldRunOutputProbe）与展示。本片测试主要走注入 request。
+ */
+export async function probeOutputLimitForConfig(
+  cfg: Config,
+  settings: OutputProbeSettings,
+): Promise<{ outcome: ProbeOutcome; written: string[]; memo: OutputProbeMemo }> {
+  const outcome = await runOutputProbe({
+    settings,
+    request: (candidate) => rawChatOnce(cfg, OUTPUT_PROBE_MESSAGES, candidate),
+  });
+  const applied = applyProbeOutcome(cfg, outcome);
+  return { outcome, ...applied };
 }

@@ -469,6 +469,8 @@ export class Agent {
     let nudgeMsg: Message | null = null;
     /** 上下文溢出恢复只做一次（A2），避免无限压缩-重试循环。 */
     let overflowRecovered = false;
+    /** 输出撞墙写回通知每轮一次，避免同一轮多次 length 重复写盘。 */
+    let outputLimitNotified = false;
     /** 本轮是否已产出最终正文（用于收口「循环结束但没回答」）。 */
     let answered = false;
     /** 轮次内是否因用户 abort 退出（循环顶部 break 路径）。 */
@@ -631,6 +633,14 @@ export class Agent {
           reasoningTokens += res.usage.completion_tokens_details?.reasoning_tokens ?? 0;
         }
         finishReason = res.finishReason;
+        if (res.finishReason === "length" && !outputLimitNotified) {
+          outputLimitNotified = true;
+          try {
+            this.opt.onOutputLimit?.({ finishReason: "length", model: this.opt.cfg.model });
+          } catch {
+            // 写回是增强项，不得打断本轮
+          }
+        }
 
         // ---- 无工具调用 → 本轮结束 ----
         if (res.toolCalls.length === 0) {

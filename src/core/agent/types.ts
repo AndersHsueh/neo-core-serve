@@ -126,6 +126,12 @@ export interface AgentOptions {
    */
   refreshContextWindow?: () => void;
   /**
+   * 输出预算撞墙（finish_reason=length）时通知宿主。
+   * 组合根负责按空字段写回 max_output_tokens；agent 不 import 写回模块。
+   * 同一轮只应调用一次。
+   */
+  onOutputLimit?: (info: { finishReason: string; model: string }) => void;
+  /**
    * 流式渲染开关（Matrix-Core 移植改动，2026-10-28）。
    *
    * 取代 `process.stdout.isTTY`：core 无终端，由组合根（session-host）显式注入
