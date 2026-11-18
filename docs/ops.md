@@ -101,7 +101,7 @@ matrix-core doctor    # run 目录 / token / core.json（最小实现）
 
 - **worker 启动顺序**：配置 → env → memory → mailbox → **锁** → session/transcript 对账 → 工具注册 → stdio ready。
 - **锁**：`run/locks/<id>/owner.json {pid, epoch, startedAt}`（mkdir 独占）+ pid 存活校验（EPERM 算存活）+ 陈旧锁 rename 抢占 + 只释放自己的锁；与 mailbox `.alive` 互认。
-- **Hub 停止（SIGTERM/SIGINT）**：停止接新连接 → 给所有 attach 的客户端发 `turn.aborted{shutdown}` → 关闭每个 worker 的 stdin → 等待 → 对 worker 进程组 SIGTERM → SIGKILL 兜底；总时长小于 ExitTimeOut（10s）。清理 `core.json` 与单实例锁后退出。worker 以 detached 建独立进程组，Hub 兜底 `kill(-pgid)`。
+- **Hub 停止（SIGTERM/SIGINT）**：停止接新连接 → 给所有 attach 的客户端发 `turn.aborted{shutdown}` → 关闭每个 worker 的 stdin → 等待 → 对 worker 进程组 SIGTERM → SIGKILL 兜底；总时长小于 ExitTimeOut（10s）。清理 `core.json` 与单实例锁后退出。worker 以 detached 建独立进程组，Hub 兜底 `kill(-pgid)`。停止开始时冻结待清理 worker 引用，避免 worker 退出从运行表移除后漏掉其仍存活的孙进程。
 - **SIGHUP**：daemon 模式下忽略；前台运行按退出处理，退出码 **129**（与 neo-cli #75 约定一致）。
 - **worker 停止**：stdin EOF 或 SIGTERM → 收口待决项 → 轮中发 `turn.aborted{shutdown}` → 修 messages 尾 → persist → memory.flush → 释放锁。
 - **worker 崩溃**：Hub 检测退出 → 删除运行态、向 attach 的客户端发 `session.status{status:"dead"}` 并解绑；**不自动重启**（无退避），下次 attach 重新 spawn `--resume`，以磁盘 transcript/messages 恢复到最后完成轮。

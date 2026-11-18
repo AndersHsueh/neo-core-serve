@@ -453,9 +453,11 @@ export function startHub(opts: HubOptions): HubHandle {
       const deadline = Date.now() + 9_000; // 小于 ExitTimeOut 10s，给外层清文件留余量
       const remain = (): number => Math.max(0, deadline - Date.now());
       accepting = false;
+      // onExit 会从 workers 删除条目；整个清理序列必须持有原始进程组引用。
+      const stoppingWorkers = [...workers];
 
       // 给所有已 attach 的客户端发 turn.aborted{shutdown}，并立刻 flush 合批队列。
-      for (const [sessionId, entry] of workers) {
+      for (const [sessionId, entry] of stoppingWorkers) {
         if (!entry.owner) continue;
         const conn = connOf(entry.owner);
         if (!conn) continue;
@@ -476,31 +478,31 @@ export function startHub(opts: HubOptions): HubHandle {
       }
 
       // 先关 worker stdin（serve --stdio 在 EOF 后走 host.close → turn.aborted{shutdown}）。
-      for (const [, entry] of workers) {
+      for (const [, entry] of stoppingWorkers) {
         entry.client.closeStdin();
       }
       const afterStdin = Math.min(2_000, remain());
       if (afterStdin > 0) {
         await Promise.race([
-          Promise.all([...workers.values()].map((e) => e.client.waitExit(afterStdin))),
+          Promise.all(stoppingWorkers.map(([, e]) => e.client.waitExit(afterStdin))),
           sleep(afterStdin),
         ]);
       }
 
       // SIGTERM 进程组（含 shell 孙进程）。
-      for (const [, entry] of workers) {
+      for (const [, entry] of stoppingWorkers) {
         entry.client.signalGroup("SIGTERM");
       }
       const afterTerm = Math.min(5_000, remain());
       if (afterTerm > 0) {
         await Promise.race([
-          Promise.all([...workers.values()].map((e) => e.client.waitExit(afterTerm))),
+          Promise.all(stoppingWorkers.map(([, e]) => e.client.waitExit(afterTerm))),
           sleep(afterTerm),
         ]);
       }
 
       // SIGKILL 兜底。
-      for (const [, entry] of workers) {
+      for (const [, entry] of stoppingWorkers) {
         entry.unsub();
         entry.unsubExit();
         entry.client.signalGroup("SIGKILL");
@@ -508,7 +510,7 @@ export function startHub(opts: HubOptions): HubHandle {
       const afterKill = Math.min(1_500, remain());
       if (afterKill > 0) {
         await Promise.race([
-          Promise.all([...workers.values()].map((e) => e.client.waitExit(afterKill))),
+          Promise.all(stoppingWorkers.map(([, e]) => e.client.waitExit(afterKill))),
           sleep(afterKill),
         ]);
       }
