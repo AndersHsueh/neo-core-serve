@@ -87,8 +87,27 @@ export type {
 /* 载入                                                                */
 /* ------------------------------------------------------------------ */
 
-export function loadConfig(overrides: Partial<Config> = {}): Config {
+/**
+ * loadConfig 的可选第二参数（K03a）。
+ *
+ * `settingsDir`：settings.json 的搜索根。缺省时仍从 `overrides.cwd` 或
+ * `process.cwd()` 起步（既有行为）。`spawnDir` / `pkgRoot` / `homeDir` /
+ * `env` 可注入，便于测试，也供后续 loadRuntimeConfig 做显式快照。
+ * 调用时不 process.chdir。
+ */
+export interface LoadConfigOptions {
+  settingsDir?: string;
+  spawnDir?: string;
+  pkgRoot?: string;
+  homeDir?: string;
+  env?: Record<string, string | undefined>;
+}
+
+export function loadConfig(overrides: Partial<Config> = {}, options: LoadConfigOptions = {}): Config {
+  const env = options.env ?? process.env;
   const here = process.cwd();
+  const spawnDir = options.spawnDir ?? here;
+  const home = options.homeDir ?? homedir();
   // Matrix-Core 移植改动（2026-10-28）：配置搜索从「会话 cwd」起步，
   // 否则 `--cwd DIR` 不会读该目录的 settings.json（main 不一定 chdir）。
   const searchCwd =
@@ -99,12 +118,25 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
       : here;
   // v0.4.0：Windows 上 URL.pathname 是 /C:/... 形态，必须用 fileURLToPath 还原盘符路径。
   // Matrix-Core：config.ts 从 src/ 下沉到 src/core/，包根要多上一级。
-  const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const pkgRoot =
+    options.pkgRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
+  const searchRoot =
+    options.settingsDir !== undefined
+      ? isAbsolute(options.settingsDir)
+        ? options.settingsDir
+        : resolve(here, options.settingsDir)
+      : searchCwd;
+  // 显式工作区（settingsDir 或 overrides.cwd）且不同于启动目录时，
+  // 缺工作区 settings 回落到 spawn，而不是直接掉进包装根密钥。
+  const explicitSearch = options.settingsDir !== undefined || overrides.cwd !== undefined;
   const candidates = [
-    join(searchCwd, "settings.json"),
+    join(searchRoot, "settings.json"),
+    ...(explicitSearch && resolve(searchRoot) !== resolve(spawnDir)
+      ? [join(spawnDir, "settings.json")]
+      : []),
     join(pkgRoot, "settings.json"),
-    join(homedir(), ".neo", "settings.json"),
+    join(home, ".neo", "settings.json"),
   ];
   const found = candidates.find((p) => existsSync(p)) ?? null;
   const raw = found ? (readJson(found) ?? {}) : {};
@@ -142,7 +174,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   // 不从模板回落 —— 模板的 "example" 是示例名，本地 providers 里通常没有这个名字，
   // 回落它会让 picked 静默退化成列表第一项，掩盖配置错误。
   const defProviderName = str(
-    process.env["NEO_PROVIDER"],
+    env["NEO_PROVIDER"],
     str(raw["default_provider"], providers[0]?.name ?? ""),
   );
   const picked =
@@ -151,7 +183,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
 
   // 默认档位
   const tierRaw = str(
-    process.env["NEO_TIER"],
+    env["NEO_TIER"],
     str(raw["default_model_tier"], str(dflt["default_model_tier"], "default")),
   );
   const tier: ModelTier = isModelTier(tierRaw) ? tierRaw : "default";
@@ -205,7 +237,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   // 会得到一个不在本地 providers 列表里的名字，直接把启动卡死。
   // 这与 providers 的处理是同一个道理：身份字段只认本地，模板只提供可调参数。
   const classifierProvider = str(
-    process.env["NEO_CLASSIFIER_PROVIDER"],
+    env["NEO_CLASSIFIER_PROVIDER"],
     str(raw["classifier_provider"], str(raw["default_provider"], picked.name)),
   );
   const clsProv = providers.find((p) => p.name === classifierProvider);
@@ -218,7 +250,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
   // 同理，模型名也不从模板取 —— 模板值是 "your-fast-model-id" 这种占位符，
   // 落到真实请求里就是一次必然失败的调用。缺省用该 provider 的 fast 模型。
   const classifierModel = str(
-    process.env["NEO_CLASSIFIER_MODEL"],
+    env["NEO_CLASSIFIER_MODEL"],
     str(raw["classifier_model_name"], clsProv.models["fast"]),
   );
 
@@ -226,10 +258,10 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     providerName: picked.name,
     providerType: picked.type,
     // 环境变量优先级最高
-    apiKey: str(process.env["NEO_API_KEY"], picked.apiKey),
-    baseUrl: normalizeBaseUrl(str(process.env["NEO_BASE_URL"], picked.baseUrl)),
+    apiKey: str(env["NEO_API_KEY"], picked.apiKey),
+    baseUrl: normalizeBaseUrl(str(env["NEO_BASE_URL"], picked.baseUrl)),
     modelTier: tier,
-    model: str(process.env["NEO_MODEL"], routeModel(routes[tier], providers, tier)),
+    model: str(env["NEO_MODEL"], routeModel(routes[tier], providers, tier)),
     providers,
     routes,
     classifierModel,
@@ -255,7 +287,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     ),
     cwd: searchCwd,
     settingsPath: found,
-    skillsStore: str(raw["skills_store"], join(homedir(), ".neo", "skills")),
+    skillsStore: str(raw["skills_store"], join(home, ".neo", "skills")),
     skillsExtraPaths: parseSkillsExtraPaths(raw["skills_extra_paths"]),
     memory: resolveMemoryConfig(raw["memory"] as Raw | undefined),
     shell: resolveShellConfig(raw["shell"]),
