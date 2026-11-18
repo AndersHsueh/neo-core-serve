@@ -8,7 +8,7 @@
  * 会高估 4 倍以上，导致小窗口永远判成超预算。实测（cl100k）：工具 schema 5168 字符 ≈ 2096 token，
  * 中文约 1.0–1.3 字符/token。
  */
-import { estimateTokens, type Message, type ToolSpec } from "../llm.ts";
+import { estimateTokens } from "../llm/estimateTokens.ts";
 
 /** 每条消息的封装余量（role/分隔符）。 */
 const MESSAGE_OVERHEAD = 4;
@@ -34,8 +34,8 @@ function conservativeTokens(text: string): number {
   return Math.ceil(cjk / CJK_CHARS_PER_TOKEN + other / ASCII_CHARS_PER_TOKEN);
 }
 
-export function countSystemTokens(systemTexts: readonly string[], tools: readonly ToolSpec[] = []): SystemOverhead {
-  const messages: Message[] = systemTexts.map((content) => ({ role: "system", content }));
+export function countSystemTokens(systemTexts: readonly string[], tools: readonly unknown[] = []): SystemOverhead {
+  const messages = systemTexts.map((content) => ({ role: "system" as const, content }));
   const heuristic = estimateTokens(messages, [...tools]);
   const conservative =
     systemTexts.reduce((n, s) => n + conservativeTokens(s), 0) +

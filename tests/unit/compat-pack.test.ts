@@ -20,7 +20,7 @@ import { join } from "node:path";
 const ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT = join(ROOT, "scripts", "build-compat.py");
 const DTS = join(ROOT, "src", "compat", "v1.d.ts");
-const ENTRY = join(ROOT, "src", "core", "contextWindow.ts");
+const ENTRY = join(ROOT, "src", "compat", "v1.ts");
 
 const BUN = process.env.NEO_COMPAT_BUILD_BUN ?? process.execPath; // pinned builder may differ from the runtime under test
 const BUN_VERSION = execFileSync(BUN, ["--version"], { encoding: "utf8" }).trim();
@@ -37,6 +37,39 @@ afterAll(() => {
 
 const sha256 = (data: Uint8Array | string): string =>
   createHash("sha256").update(data).digest("hex");
+
+const VALUE_EXPORTS = [
+  "attributeFailure",
+  "buildAnthropicBody",
+  "countSystemTokens",
+  "DEFAULT_SELECTION_CONFIG",
+  "FULL_MIN_WINDOW",
+  "isAuthErrorText",
+  "isContextLengthErrorText",
+  "isContextOverflowError",
+  "isMaxTokensErrorText",
+  "isParallelToolCallsRejection",
+  "isRetryableAnthropicError",
+  "isWindowTrusted",
+  "knownWindow",
+  "mapStopReason",
+  "mapUsage",
+  "OPAQUE_400_DOWNGRADE_FLOOR",
+  "parseAnthropicMessage",
+  "parseContextLimitFromError",
+  "parseMaxTokensLimit",
+  "rank",
+  "redactFallbackText",
+  "resolveContextWindow",
+  "sanitizeToolId",
+  "selectPromptTier",
+  "shouldDowngradeForOpaque400",
+  "STANDARD_MIN_WINDOW",
+  "TIER_CORE",
+  "TIER_ORDER",
+  "toAnthropicMessages",
+  "toAnthropicTools",
+];
 
 /* ------------------------------------------------------------------ *
  * 1. 结构契约（不依赖 candidate）
@@ -81,41 +114,31 @@ describe("compat pack · 结构契约", () => {
     expect(src).toContain("--minify");
   });
 
-  test("公开 DTO 只声明 4 函数 + 3 类型，且无运行时代码", () => {
+  test("公开 DTO 只声明已晋升纯叶，且无运行时代码", () => {
     const src = readFileSync(DTS, "utf8");
-    // 去掉块注释与行注释后，只应剩 declare / interface / type 三种语句。
-    // 接口/函数体内的成员行（`x: T;`、`) : T;`）属于声明的一部分，不算可执行语句；
-    // 真正的判据是：没有任何 import/赋值/调用/类/语句关键字。
+    // 去掉块注释与行注释后，只应剩 declare / interface / type / declare const。
+    // 接口/函数体内的成员行属于声明的一部分，不算可执行语句。
     const code = src
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line && !line.startsWith("//"))
       .join("\n");
-    expect(code).not.toMatch(/\bimport\b|\bclass\b|\bconst\b|\blet\b|\bvar\b|\bfunction\s+\w+\s*\([^)]*\)\s*\{/);
+    expect(code).not.toMatch(/\bimport\b|\bclass\b|\blet\b|\bvar\b|\bfunction\s+\w+\s*\([^)]*\)\s*\{/);
+    expect(code).not.toMatch(/(?<!export declare )\bconst\b/);
     // 无赋值语句（`export type X = ...` 的类型别名除外）。
     expect(code).not.toMatch(/^(?!export\s+type\b).*=/m);
     expect(code).not.toMatch(/\breturn\b|\bif\s*\(/); // 无语句
     const fns = [...src.matchAll(/export declare function (\w+)/g)].map((m) => m[1]);
-    expect(fns.sort()).toEqual([
-      "isContextOverflowError",
-      "knownWindow",
-      "parseContextLimitFromError",
-      "resolveContextWindow",
-    ]);
-    const types = [...src.matchAll(/export (?:type|interface) (\w+)/g)].map((m) => m[1]);
-    expect(types.sort()).toEqual(["ContextWindowEnv", "ResolvedWindow", "WindowSource"]);
+    const consts = [...src.matchAll(/export declare const (\w+)/g)].map((m) => m[1]);
+    expect([...fns, ...consts].sort()).toEqual([...VALUE_EXPORTS].sort());
+    expect(code).not.toMatch(/learnedMaxTokens|announceLearnedLimit|appendMaxTokensHint|AnthropicStreamAccumulator|ModelFallbackController|effectiveMaxTokens/);
     expect(src).not.toMatch(/\bimport\b/);
   });
 
   test("core 实现导出的公开符号与声明一致（唯一实现，不复制算法）", async () => {
     const mod = await import(ENTRY);
-    expect(Object.keys(mod).sort()).toEqual([
-      "isContextOverflowError",
-      "knownWindow",
-      "parseContextLimitFromError",
-      "resolveContextWindow",
-    ]);
+    expect(Object.keys(mod).sort()).toEqual([...VALUE_EXPORTS].sort());
   });
 });
 
@@ -123,14 +146,43 @@ describe("compat pack · 结构契约", () => {
  * 2. 行为契约（临时 git 仓里造 candidate，实调打包）
  * ------------------------------------------------------------------ */
 
-/** 造一个最小 core 仓：只含打包需要的 4 个输入文件，并提交成 candidate。 */
+/** 从打包入口走相对导入图，拷齐构建所需源文件，再提交成 candidate。 */
+function collectSourceGraph(root: string, entryRel: string): Record<string, string> {
+  const files: Record<string, string> = {};
+  const stack = [entryRel];
+  const fromRe = /(?:\bfrom\s+|\bimport\s+|\bexport\s+)['"](\.[^'"]+)['"]/g;
+  while (stack.length) {
+    const rel = stack.pop()!;
+    if (files[rel] !== undefined) continue;
+    const abs = join(root, rel);
+    const text = readFileSync(abs, "utf8");
+    files[rel] = text;
+    fromRe.lastIndex = 0;
+    for (const m of text.matchAll(fromRe)) {
+      const spec = m[1] ?? "";
+      const resolved = join(rel, "..", spec);
+      // join() 会保留多余的 /../ 之外的归一；再用路径段手工压平。
+      const parts: string[] = [];
+      for (const part of resolved.split("/")) {
+        if (part === "" || part === ".") continue;
+        if (part === "..") parts.pop();
+        else parts.push(part);
+      }
+      let dep = parts.join("/");
+      if (!/\.(ts|tsx|js)$/.test(dep)) dep += ".ts";
+      if (files[dep] === undefined) stack.push(dep);
+    }
+  }
+  return files;
+}
+
 function makeCandidateRepo(): { repo: string; candidate: string } {
   const repo = tmp("neo-compat-repo-");
   const files: Record<string, string> = {
     "scripts/build-compat.py": readFileSync(SCRIPT, "utf8"),
-    "src/core/contextWindow.ts": readFileSync(ENTRY, "utf8"),
     "src/compat/v1.d.ts": readFileSync(DTS, "utf8"),
     "bun.lock": readFileSync(join(ROOT, "bun.lock"), "utf8"),
+    ...collectSourceGraph(ROOT, "src/compat/v1.ts"),
   };
   for (const [rel, text] of Object.entries(files)) {
     const abs = join(repo, rel);
@@ -250,6 +302,12 @@ describe("compat pack · 行为契约", () => {
     expect(js).not.toContain("require(");
     expect(js).not.toContain(".ts");
     expect(js).toContain("resolveContextWindow");
+    expect(js).toContain("selectPromptTier");
+    expect(js).toContain("sanitizeToolId");
+    expect(js).toContain("redactFallbackText");
+    expect(js).not.toContain("AnthropicStreamAccumulator");
+    expect(js).not.toContain("ModelFallbackController");
+    expect(js).not.toContain("learnedMaxTokens");
 
     // 确定性元数据：uid/gid/mtime 归零、无用户名。
     for (const [, uid, gid, mtime, uname, gname] of archive.meta) {
@@ -280,6 +338,8 @@ describe("compat pack · 行为契约", () => {
         `import * as m from ${JSON.stringify(join(extract, "package", "index.js"))};`,
         "const env = { contextWindow: 128000, source: 'overflow_error', updatedAt: 't' };",
         "const r = m.resolveContextWindow(512000, 'glm-5.3-flash', env);",
+        "const foreign = { name: 'LLMError', message: 'socket hang up' };",
+        "const attributed = m.attributeFailure(foreign, false);",
         "console.log(JSON.stringify({",
         "  keys: Object.keys(m).sort(),",
         "  identity: r.env === env,",
@@ -287,21 +347,29 @@ describe("compat pack · 行为契约", () => {
         "  unknown: m.resolveContextWindow(NaN, 'no-such-model-xyz', null),",
         "  limit: m.parseContextLimitFromError('maximum context length is 128000 tokens'),",
         "  overflow: m.isContextOverflowError({ message: 'context length exceeded', status: 400 }),",
+        "  toolId: m.sanitizeToolId('ab/cd'),",
+        "  retryable: m.isRetryableAnthropicError('overloaded_error'),",
+        "  redacted: m.redactFallbackText('Bearer sk-abcdefghijklmnopqrstuvwxyz  https://example.com/x'),",
+        "  attributed,",
+        "  opaqueFloor: m.OPAQUE_400_DOWNGRADE_FLOOR,",
+        "  tier: m.selectPromptTier({ window: 200000, source: 'config', overhead: { mini: 100, standard: 200, full: 300 } }).tier,",
         "}));",
       ].join("\n"),
     );
     const probe = JSON.parse(execFileSync(BUN, [script], { encoding: "utf8" }));
-    expect(probe.keys).toEqual([
-      "isContextOverflowError",
-      "knownWindow",
-      "parseContextLimitFromError",
-      "resolveContextWindow",
-    ]);
+    expect(probe.keys).toEqual([...VALUE_EXPORTS].sort());
     expect(probe.identity).toBe(true);
     expect(probe.r).toMatchObject({ tokens: 128_000, source: "overflow_error" });
     expect(probe.unknown).toEqual({ tokens: 200_000, source: "default" });
     expect(probe.limit).toBe(128_000);
     expect(probe.overflow).toBe(true);
+    expect(probe.toolId).toBe("ab_cd");
+    expect(probe.retryable).toBe(true);
+    expect(probe.redacted).toContain("[REDACTED]");
+    expect(probe.redacted).toContain("[URL]");
+    expect(probe.attributed).toMatchObject({ code: "network" });
+    expect(probe.opaqueFloor).toBe(8192);
+    expect(probe.tier).toBe("full");
   });
 });
 
@@ -312,14 +380,18 @@ describe("compat pack · 行为契约", () => {
 describe("compat pack · 类型兼容", () => {
   test("v1.d.ts 与 core 实现双向可赋值（tsc --noEmit 通过）", () => {
     const dir = tmp("neo-compat-types-");
-    const core = join(ROOT, "src", "core", "contextWindow.ts");
+    const core = join(ROOT, "src", "compat", "v1.ts");
     const dts = join(ROOT, "src", "compat", "v1.d.ts");
+    const llmTypes = join(ROOT, "src", "core", "llm", "messageTypes.ts");
+    const classify = join(ROOT, "src", "core", "llm", "maxTokensClassify.ts");
     const probe = join(dir, "probe.ts");
     writeFileSync(
       probe,
       [
         `import * as core from ${JSON.stringify(core)};`,
         `import type * as v1 from ${JSON.stringify(dts)};`,
+        `import type * as llm from ${JSON.stringify(llmTypes)};`,
+        `import * as classify from ${JSON.stringify(classify)};`,
         "import type { ModelContextInfo } from " +
           JSON.stringify(join(ROOT, "src", "core", "env", "types.ts")) +
           ";",
@@ -330,12 +402,23 @@ describe("compat pack · 类型兼容", () => {
         "const c: typeof v1.knownWindow = core.knownWindow;",
         "const d: typeof v1.isContextOverflowError = core.isContextOverflowError;",
         "const e: typeof v1.parseContextLimitFromError = core.parseContextLimitFromError;",
+        "const f: typeof v1.selectPromptTier = core.selectPromptTier;",
+        "const g: typeof v1.sanitizeToolId = core.sanitizeToolId;",
+        "const h: typeof v1.attributeFailure = core.attributeFailure;",
+        "const i: typeof v1.redactFallbackText = core.redactFallbackText;",
+        "const j: typeof v1.parseMaxTokensLimit = classify.parseMaxTokensLimit;",
+        "const k: typeof classify.parseMaxTokensLimit = core.parseMaxTokensLimit;",
+        "const l: typeof v1.countSystemTokens = core.countSystemTokens;",
         "",
         "// 2) 类型双向可赋值",
         "const src: v1.WindowSource = null as unknown as core.WindowSource;",
         "const back: core.WindowSource = null as unknown as v1.WindowSource;",
         "const rw: v1.ResolvedWindow = null as unknown as core.ResolvedWindow;",
         "const rwBack: core.ResolvedWindow = null as unknown as v1.ResolvedWindow;",
+        "const tier: v1.PromptTier = null as unknown as core.PromptTier;",
+        "const tierBack: core.PromptTier = null as unknown as v1.PromptTier;",
+        "const msg: v1.Message = null as unknown as llm.Message;",
+        "const msgBack: llm.Message = null as unknown as v1.Message;",
         "",
         "// 3) core 的真实 env 记录可直接传给 compat 函数（结构兼容）",
         "declare const info: ModelContextInfo;",
@@ -344,7 +427,7 @@ describe("compat pack · 类型兼容", () => {
         "// 4) 返回 env 保持 identity（同一对象）",
         "const same: ModelContextInfo | undefined = resolved.env;",
         "",
-        "export const _check = [a, b, c, d, e, src, back, rw, rwBack, viaCompat, same];",
+        "export const _check = [a, b, c, d, e, f, g, h, i, j, k, l, src, back, rw, rwBack, tier, tierBack, msg, msgBack, viaCompat, same];",
       ].join("\n"),
     );
     const tsconfig = join(dir, "tsconfig.json");
@@ -352,7 +435,7 @@ describe("compat pack · 类型兼容", () => {
       tsconfig,
       JSON.stringify({
         compilerOptions: {
-          lib: ["ESNext"],
+          lib: ["ESNext", "DOM"],
           target: "ESNext",
           module: "ESNext",
           moduleResolution: "bundler",

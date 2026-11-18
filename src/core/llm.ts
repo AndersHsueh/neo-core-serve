@@ -38,40 +38,16 @@ export {
   shouldDowngradeForOpaque400,
 } from "./llm/maxTokens.ts";
 
-export type Role = "system" | "user" | "assistant" | "tool";
-
-/**
- * 多模态 content part（PRD docs/paste-enhancement-prd[done].md §5.5）。
- * OpenAI 兼容 /chat/completions 的 user 消息标准形态；仅 user 消息可能携带数组，
- * system/assistant/tool 恒为 string（结构性约束，发送层不做转换）。
- */
-export type ContentPart =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
-
-export interface ToolCall {
-  id: string;
-  type: "function";
-  function: { name: string; arguments: string };
-}
-
-/**
- * Anthropic 的思考块（含签名），原样保存以便下一轮回带。
- * 只在 Anthropic 协议路径下使用：OpenAI 路径、压缩、token 估算都忽略它。
- */
-export type ThinkingBlock =
-  | { type: "thinking"; thinking: string; signature: string }
-  | { type: "redacted_thinking"; data: string };
-
-export interface Message {
-  role: Role;
-  content: string | ContentPart[] | null;
-  name?: string;
-  tool_call_id?: string;
-  tool_calls?: ToolCall[];
-  /** assistant 专用：上一轮 Anthropic 响应里的思考块，回带时排在 text/tool_use 之前。 */
-  thinking_blocks?: ThinkingBlock[];
-}
+export type {
+  Role,
+  ContentPart,
+  ToolCall,
+  ThinkingBlock,
+  Message,
+  ToolSpec,
+  Usage,
+  StreamResult,
+} from "./llm/messageTypes.ts";
 
 /**
  * 取消息的纯文本视图（C8 适配收口）。
@@ -86,33 +62,6 @@ export function contentText(content: Message["content"]): string | null {
     .map((p) => (p.type === "text" ? p.text : ""))
     .join("")
     .trim();
-}
-
-export interface ToolSpec {
-  type: "function";
-  function: {
-    name: string;
-    description: string;
-    parameters: Record<string, unknown>;
-  };
-}
-
-export interface Usage {
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
-  completion_tokens_details?: { reasoning_tokens?: number };
-}
-
-export interface StreamResult {
-  content: string;
-  reasoning: string;
-  toolCalls: ToolCall[];
-  finishReason: string | null;
-  usage: Usage | null;
-  raw: unknown;
-  /** Anthropic 协议下的思考块（含签名）；agent 写进 assistant 消息以便回带。 */
-  thinkingBlocks?: ThinkingBlock[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -672,63 +621,4 @@ export async function listModels(cfg: Config): Promise<string[]> {
   return (json.data ?? []).map((m) => m.id ?? "").filter(Boolean);
 }
 
-/** 粗略 token 估算：ASCII 约 4 字符/token，CJK 约 1.5 字符/token。 */
-export function estimateTokens(messages: Message[], tools: ToolSpec[] = []): number {
-  // 逐段累积「文本」与「字符数」两样东西：
-  // 字符数用于算ASCII 份额，文本本身用于数 CJK。
-  // 早期版本把字符数（number）当文本传给 countCjk，String(number) 后再数 CJK 恒为 0，
-  // 于是中文被按 4 字符/token 计，低估约 2.7 倍 —— 压缩触发点因此严重偏晚。
-  let chars = 0;
-  let cjk = 0;
-  let images = 0;
-  const eat = (s: string): void => {
-    chars += s.length;
-    cjk += countCjk(s);
-  };
-
-  for (const m of messages) {
-    if (typeof m.content === "string") {
-      eat(m.content ?? "");
-    } else if (Array.isArray(m.content)) {
-      // 多模态：text part 按原算法；image part 固定 800 tokens/图
-      // （OpenAI detail:low 档量级；各服务端口径不一，粗估即可 —— PRD §5.5）
-      for (const p of m.content) {
-        if (p.type === "text") eat(p.text);
-        else images += 1;
-      }
-    }
-    for (const tc of m.tool_calls ?? []) {
-      eat(tc.function.arguments);
-      eat(tc.function.name);
-    }
-  }
-
-  eat(JSON.stringify(tools));
-
-  const ascii = Math.max(0, chars - cjk);
-  return Math.ceil(ascii / 4 + cjk / 1.5) + messages.length * 4 + images * 800;
-}
-
-/**
- * 统计 CJK 字符数。
- *
- * 必须传字符串本身，不能传长度 —— 数字里没有 CJK，恒返回 0。
- * 覆盖范围按 code point 判定，含中日韩表意文字与假名音标。
- */
-function countCjk(s: string): number {
-  let n = 0;
-  for (const ch of s) {
-    const cp = ch.codePointAt(0) ?? 0;
-    // 0x3000-0x30FF：CJK 标点 / 假名；0x3400-0x9FFF：表意文字与兼容区
-    // 0xF900-0xFAFF：兼容表意文字；0xFF00-0xFF60：全角字符
-    if (
-      (cp >= 0x3000 && cp <= 0x30ff) ||
-      (cp >= 0x3400 && cp <= 0x9fff) ||
-      (cp >= 0xf900 && cp <= 0xfaff) ||
-      (cp >= 0xff00 && cp <= 0xff60)
-    ) {
-      n++;
-    }
-  }
-  return n;
-}
+export { estimateTokens } from "./llm/estimateTokens.ts";

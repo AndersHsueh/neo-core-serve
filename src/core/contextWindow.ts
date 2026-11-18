@@ -17,10 +17,11 @@ export type WindowSource = "config" | "models_api" | "overflow_error" | "known" 
 /**
  * env 事实的最小结构（结构类型，不 import `env/types.ts`）。
  *
- * 为什么不用 `ModelContextInfo`：本文件是 `@neo/core-compat` 的唯一打包入口，
- * 打包时只允许它零依赖；`env/types.ts` 会拖进整棵 shell/config 声明树。
+ * 为什么不用 `ModelContextInfo`：本文件是 compat 窗口叶的零依赖实现，
+ * 不能 import `env/types.ts`（会拖进整棵 shell/config 声明树）。
  * 这里的字段与 `ModelContextInfo` 的窗口子集逐字兼容，调用方传真实记录即可
  * —— 多出的字段（updatedAt/evidence/...）照原样带回，保持 identity。
+ * 打包入口现为 `src/compat/v1.ts`，本文件仍是窗口算法的唯一住处。
  */
 export interface ContextWindowEnv {
   /** 探测到的窗口；null = 只知道存在但没拿到值。 */

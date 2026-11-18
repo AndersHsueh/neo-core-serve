@@ -28,3 +28,18 @@ export class LLMTimeoutError extends LLMError {
     this.name = "LLMTimeoutError";
   }
 }
+
+/**
+ * 跨包识别 LLM 错误：本仓 instanceof 仍优先；旧侧同类（name 为 LLMError /
+ * LLMTimeoutError，结构含 message/status/body）也认，避免 compat 归档里的
+ * instanceof 对宿主自己的 LLMError 一律判否。
+ */
+export function isLlmErrorLike(
+  err: unknown,
+): err is { message: string; status?: number; body?: string; name: string } {
+  if (err instanceof LLMError) return true;
+  if (err === null || typeof err !== "object") return false;
+  const e = err as { name?: unknown; message?: unknown };
+  if (typeof e.message !== "string") return false;
+  return e.name === "LLMError" || e.name === "LLMTimeoutError";
+}

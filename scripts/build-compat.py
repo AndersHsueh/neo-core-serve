@@ -39,12 +39,12 @@ from pathlib import Path
 # ---- 固定契约 -------------------------------------------------------------
 
 PACKAGE_NAME = "@neo/core-compat"
-PACKAGE_VERSION = "0.0.0-k01"
+PACKAGE_VERSION = "0.0.0-k01"  # 私有过渡包版本，不是 core 0.0.2
 ENGINES_BUN = ">=1.1.0"
 REQUIRED_BUN_VERSION = "1.3.0"
 
-# 打包入口：唯一实现，不复制算法。
-ENTRY = "src/core/contextWindow.ts"
+# 打包入口：再导出已晋升纯叶，不复制算法。
+ENTRY = "src/compat/v1.ts"
 # 公开 DTO 声明（无运行时代码）。
 DTS_SOURCE = "src/compat/v1.d.ts"
 # 构建器自身：必须与 candidate 一致，否则拒绝构建。
@@ -75,10 +75,12 @@ FORBIDDEN_IN_INDEX_JS = (
     "import ",  # ESM import = 有依赖
     "require(",
     "process.env",
-    "sk-",
     "api_key",
     "API_KEY",
 )
+
+# 真实密钥形态（sk- 后至少 8 位字母数字）。脱敏正则里的 `sk-[A-Za-z0-9_-]` 不算泄漏。
+LEAKED_KEY_RE = re.compile(r"sk-[A-Za-z0-9]{8,}")
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -111,6 +113,57 @@ def read_candidate_file(repo: Path, candidate: str, path: str) -> bytes:
         return git(repo, "show", f"{candidate}:{path}")
     except BuildError as exc:
         raise BuildError(f"candidate {candidate} 里没有 {path}：{exc}") from exc
+
+
+
+_REL_FROM_RE = re.compile(r"""(?:\bfrom\s+|\bimport\s+|\bexport\s+)['\"](\.[^'\"]+)['\"]""")
+
+
+def _resolve_relative(importer: str, spec: str) -> str:
+    """把 `./foo.ts` 解析成仓根相对路径。"""
+    if not spec.startswith("."):
+        raise BuildError(f"{importer} 引用了非相对路径 {spec!r}（compat 归档禁止外部依赖）")
+    base = Path(importer).parent
+    parts: list[str] = []
+    for part in (base / spec).as_posix().split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                raise BuildError(f"{importer} 的导入 {spec!r} 越出仓根")
+            parts.pop()
+        else:
+            parts.append(part)
+    rel = "/".join(parts)
+    if not rel.endswith((".ts", ".tsx", ".js")):
+        rel = rel + ".ts"
+    return rel
+
+
+def collect_source_graph(repo: Path, candidate: str, entry: str) -> dict[str, bytes]:
+    """从入口出发，只读 candidate 里的相对导入图。"""
+    files: dict[str, bytes] = {}
+    stack = [entry]
+    while stack:
+        path = stack.pop()
+        if path in files:
+            continue
+        data = read_candidate_file(repo, candidate, path)
+        files[path] = data
+        text = data.decode("utf-8")
+        for match in _REL_FROM_RE.finditer(text):
+            dep = _resolve_relative(path, match.group(1))
+            if dep not in files:
+                stack.append(dep)
+    return files
+
+
+def materialize_sources(workdir: Path, files: dict[str, bytes]) -> None:
+    for rel, data in files.items():
+        dest = workdir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+
 
 
 def assert_builder_matches_candidate(repo: Path, candidate: str) -> None:
@@ -173,7 +226,7 @@ def run_bun_build(bun: Path, workdir: Path) -> bytes:
     cmd = [
         str(bun),
         "build",
-        str(workdir / Path(ENTRY).name),
+        str(workdir / ENTRY),
         f"--outfile={outfile}",
         *BUN_BUILD_ARGS,
     ]
@@ -195,6 +248,9 @@ def assert_clean_bundle(js: bytes) -> None:
     for needle in FORBIDDEN_IN_INDEX_JS:
         if needle in text:
             raise BuildError(f"产物 index.js 含禁止内容 {needle!r}（源码/依赖/密钥泄漏）")
+    leaked = LEAKED_KEY_RE.search(text)
+    if leaked:
+        raise BuildError(f"产物 index.js 含疑似密钥 {leaked.group(0)!r}")
 
 
 def package_manifest() -> dict:
@@ -223,8 +279,9 @@ def provenance_doc(
     dts_sha: str,
     index_js_sha: str,
     package_json_sha: str,
+    source_files: dict[str, str],
 ) -> dict:
-    """只记过去：候选 SHA、锁、Bun、构建参数与产物哈希；不记归档自身/未来提交。"""
+    """只记过去：候选 SHA、锁、Bun、构建参数、源图与产物哈希；不记归档自身/未来提交。"""
     return {
         "schema": "neo-core-compat/provenance@1",
         "package": {"name": PACKAGE_NAME, "version": PACKAGE_VERSION},
@@ -237,6 +294,8 @@ def provenance_doc(
             "lockfile": LOCKFILE,
             "lockfileSha256": lock_sha,
             "builder": BUILDER,
+            "sources": sorted(source_files),
+            "sourceSha256": {k: source_files[k] for k in sorted(source_files)},
         },
         "bun": {
             "version": bun_version,
@@ -318,15 +377,21 @@ def build(candidate: str, bun_arg: str, output: Path, repo: Path) -> dict:
     entry_bytes = read_candidate_file(repo, candidate, ENTRY)
     dts_bytes = read_candidate_file(repo, candidate, DTS_SOURCE)
     lock_bytes = read_candidate_file(repo, candidate, LOCKFILE)
+    sources = collect_source_graph(repo, candidate, ENTRY)
+    if ENTRY not in sources or sources[ENTRY] != entry_bytes:
+        raise BuildError("入口图收集结果与 candidate 入口不一致")
 
     with tempfile.TemporaryDirectory(prefix="neo-compat-") as tmp:
         workdir = Path(tmp)
-        (workdir / Path(ENTRY).name).write_bytes(entry_bytes)
+        materialize_sources(workdir, sources)
         index_js = run_bun_build(bun_path, workdir)
 
     assert_clean_bundle(index_js)
 
     package_json = (json.dumps(package_manifest(), indent=2, sort_keys=True) + "\n").encode()
+    source_files = {
+        path: hashlib.sha256(data).hexdigest() for path, data in sources.items()
+    }
     provenance = provenance_doc(
         candidate=candidate,
         lock_sha=hashlib.sha256(lock_bytes).hexdigest(),
@@ -336,6 +401,7 @@ def build(candidate: str, bun_arg: str, output: Path, repo: Path) -> dict:
         dts_sha=hashlib.sha256(dts_bytes).hexdigest(),
         index_js_sha=hashlib.sha256(index_js).hexdigest(),
         package_json_sha=hashlib.sha256(package_json).hexdigest(),
+        source_files=source_files,
     )
     provenance_bytes = (json.dumps(provenance, indent=2, sort_keys=True) + "\n").encode()
 
