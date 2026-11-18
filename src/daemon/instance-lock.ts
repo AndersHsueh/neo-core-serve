@@ -17,7 +17,7 @@ export interface InstanceOwner { pid: number; startedAt: string; kind: InstanceK
 export type AcquireInstanceResult =
   | { ok: true; dir: string }
   | { ok: false; reason: "held"; owner: InstanceOwner; url: string | null };
-const held = new Map<string, { db: Database; token: string }>();
+const held = new Map<string, Database>();
 const ownerPath = (dir: string): string => join(dir, "owner.json");
 
 export function readInstanceOwner(dir: string): InstanceOwner | null {
@@ -66,7 +66,7 @@ export function acquireInstanceLock(
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(tmp, `${JSON.stringify({ pid: process.pid, startedAt: new Date(now()).toISOString(), kind, token })}\n`, { mode: 0o600, flag: "wx" });
     renameSync(tmp, ownerPath(dir));
-    held.set(dir, { db, token });
+    held.set(dir, db);
     return { ok: true, dir };
   } catch (error) {
     rmSync(tmp, { force: true });
@@ -76,8 +76,8 @@ export function acquireInstanceLock(
 }
 export function releaseInstanceLock(dir: string | null, pid = process.pid): void {
   if (!dir || pid !== process.pid) return;
-  const lease = held.get(dir);
-  if (!lease) return; // Never delete another process/generation's metadata.
+  const db = held.get(dir);
+  if (!db) return; // Never delete another process/generation's metadata.
   try { rmSync(ownerPath(dir), { force: true }); }
-  finally { held.delete(dir); lease.db.close(); }
+  finally { held.delete(dir); db.close(); }
 }
