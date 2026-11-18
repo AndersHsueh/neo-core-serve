@@ -86,7 +86,7 @@ export async function cmdDaemon(argv: string[]): Promise<number> {
         if (result.code !== 0) {
           writeErr(result.stderr || `matrix-core: daemon install 失败（exit ${result.code}）`);
           if (result.stdout) writeOut(result.stdout);
-          return result.code === 0 ? 0 : 1;
+          return 1;
         }
         writeOut(`matrix-core: 已安装 ${result.file}`);
         if (result.stdout.trim()) writeOut(result.stdout.trim());
@@ -110,7 +110,7 @@ export async function cmdDaemon(argv: string[]): Promise<number> {
         if (result.stdout) writeOut(result.stdout);
         if (result.code !== 0) {
           writeErr(result.stderr || `matrix-core: daemon start 失败（exit ${result.code}）`);
-          return result.code === 0 ? 0 : 1;
+          return 1;
         }
         writeOut("matrix-core: daemon start 已发出");
         return 0;
@@ -184,11 +184,7 @@ export async function cmdDaemon(argv: string[]): Promise<number> {
 
 function fallbackStop(): number {
   const { info, alive } = readCoreJson();
-  if (!info || typeof info.pid !== "number") {
-    writeOut("matrix-core: 未运行");
-    return 0;
-  }
-  if (!alive) {
+  if (!info || typeof info.pid !== "number" || !alive) {
     writeOut("matrix-core: 未运行");
     return 0;
   }
